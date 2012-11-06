@@ -36,7 +36,7 @@
 
 #define dump_itransfer_info(itransfer) \
     do {                                                                \
-        struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer); \
+        struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer); \
         usbi_dbg("Dumping itransfer data\n"                             \
                  "\nitransfer = %p\n"                                   \
                  "device_handle = %p\n"                                 \
@@ -226,7 +226,7 @@ static int handle_urb_status(struct urb_tailq * node)
     int status;
 
     struct usbi_transfer *itransfer = node->itransfer;
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
 
     status = usbd_urb_status(tpriv->urb, &ustatus, &usize);
@@ -385,7 +385,7 @@ static void device_removal_callback(struct usbd_connection * connection,
         return;
     }
     pthread_mutex_lock(&ctx->open_devs_lock);
-    list_for_each_entry(handle, &ctx->open_devs, list) {
+    list_for_each_entry(handle, &ctx->open_devs, list, libusb_device_handle) {
         device = handle->dev;
         if ( busno == device->bus_number
              && devno == device->device_address)
@@ -1105,7 +1105,7 @@ static int submit_control_transfer(struct usbi_transfer *itransfer)
     dump_itransfer_info(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct libusb_transfer *transfer = 
-        __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+        USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_device_handle_priv *hpriv =
         __device_handle_priv(transfer->dev_handle);
     struct libusb_control_setup * setup = libusb_control_transfer_get_setup(transfer);
@@ -1237,7 +1237,7 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer, unsigned char u
     /* === libusb === */
     dump_itransfer_info(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct libusb_device_handle *dev_handle = transfer->dev_handle;
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(dev_handle);
     struct nto_qnx_device_priv *dpriv = __device_priv(dev_handle->dev);
@@ -1411,7 +1411,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer)
 
     /* === libusb === */
     usbi_dbg("itransfer pointer = %p", itransfer);
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct libusb_device_handle *dev_handle = transfer->dev_handle;
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(dev_handle);
@@ -1582,7 +1582,7 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer)
 static int op_submit_transfer(struct usbi_transfer *itransfer)
 {
 	struct libusb_transfer *transfer =
-		__USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+		USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 
 	switch (transfer->type) {
 	case LIBUSB_TRANSFER_TYPE_CONTROL:
@@ -1605,7 +1605,7 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     usbi_info(ITRANSFER_CTX(itransfer), "handling callbacks");
     usbi_info(ITRANSFER_CTX(itransfer), "handling itransfer = %p", itransfer);
     dump_itransfer_info(itransfer);
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
     struct nto_qnx_device_priv *dpriv = __device_priv(transfer->dev_handle->dev);
@@ -1719,7 +1719,7 @@ static void qnx_async_io_callback(struct usbd_urb * urb, struct usbd_pipe * upip
     usbi_dbg ("handling async callback");
     
     struct usbi_transfer *itransfer = (struct usbi_transfer *) userdata;
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
 
@@ -1804,7 +1804,7 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds, nfds
         continue;
         
         --num_ready;
-        list_for_each_entry(handle, &ctx->open_devs, list) 
+        list_for_each_entry(handle, &ctx->open_devs, list, libusb_device_handle) 
         {
             hpriv = __device_handle_priv(handle);
             if (hpriv->fds[0] == pollfd->fd)
@@ -2221,7 +2221,7 @@ static int op_clock_gettime(int clk_id, struct timespec *tp)
 static int cancel_control_transfer(struct usbi_transfer *itransfer)
 {
     int r;
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
     
     
@@ -2240,7 +2240,7 @@ static int cancel_control_transfer(struct usbi_transfer *itransfer)
 static int cancel_transfers(struct usbi_transfer *itransfer)
 {
     int r;
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     /* struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle); */
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
 
@@ -2263,7 +2263,7 @@ static int cancel_transfers(struct usbi_transfer *itransfer)
  */
 static int op_cancel_transfer(struct usbi_transfer *itransfer)
 {
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     
     switch (transfer->type) {
     case LIBUSB_TRANSFER_TYPE_CONTROL:
@@ -2413,7 +2413,7 @@ static void op_destroy_device(struct libusb_device *dev)
  */
 static void op_clear_transfer_priv(struct usbi_transfer *itransfer)
 {
-    struct libusb_transfer *transfer = __USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
+    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
 
