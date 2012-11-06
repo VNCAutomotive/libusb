@@ -350,6 +350,40 @@ static void *urb_polling_thread_main(void *arg0)
     return NULL;
 }
 
+/* Finds the correct configuration, interface and alternate setting
+ * for the given endpoint. */
+static int get_endpoint_config_path(struct libusb_device_handle *handle,
+                                    unsigned char endpoint,
+                                    struct usbd_device ** usbd_device,
+                                    int *configuration,
+                                    int * iface,
+                                    int * alt_setting)
+{
+    struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
+    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
+    int r = LIBUSB_SUCCESS;
+    *configuration = dpriv->selected_configuration;
+    if ( *configuration == -1 ) 
+    {
+        usbi_dbg("Didn't know what configuration to use,"
+                 " sending out control transfer to figure it out.");
+        /* if we haven't explicitly selected a configuration, find out
+           what configuration the device is using */
+        libusb_get_configuration(handle, configuration);
+        dpriv->selected_configuration = *configuration;
+    }
+    *usbd_device = NULL;
+    *iface = -1;
+    *alt_setting = -1;
+    r = LIBUSB_ERROR_INVALID_PARAM;
+
+    usbi_dbg("Failed to discover config path for endpoint %d: "
+             "got %d->%d->%d",
+             endpoint, *configuration, *iface, *alt_setting);
+    return r;
+
+}
+
 
 /* libusb doesn't support dynamic insertion so neither do we */
 static void device_insertion_callback(struct usbd_connection * connection,
@@ -375,7 +409,8 @@ static void device_removal_callback(struct usbd_connection * connection,
     struct nto_qnx_device_handle_priv *hpriv;
 
     int busno, devno;
-    busno = instance->path, devno = instance->devno;
+    busno = instance->path;
+    devno = instance->devno;
 
     /* Get the default context */
     USBI_GET_CONTEXT(ctx);
@@ -915,7 +950,9 @@ static int op_open(struct libusb_device_handle *handle)
     struct usbd_pipe * u_pipe;
 
     /* find internal device struct, don't care which interface */
-    busno = dev->bus_number, devno = dev->device_address, ifno = 0;
+    busno = dev->bus_number;
+    devno = dev->device_address;
+    ifno = 0;
 
     usbd_c = dpriv->connection;
     usbd_d = dpriv->usbd_device;
@@ -948,7 +985,8 @@ static int op_open(struct libusb_device_handle *handle)
         /* Make an instance manually */
         usbi_dbg ("Now working on attaching/reattaching the device to the stack");
         memset(&instance, USBD_CONNECT_WILDCARD, sizeof(usbd_device_instance_t));
-        instance.path = busno, instance.devno = devno;
+        instance.path = busno;
+        instance.devno = devno;
 
         status = usbd_attach(global_connection, &instance, 0, &usbd_d);
         if (status != EOK) {
@@ -1003,6 +1041,9 @@ static int op_open(struct libusb_device_handle *handle)
     return r;
 }
 
+/* Forward declare as this is used by op_close. */
+static int op_release_interface(struct libusb_device_handle *handle, int iface);
+
 /* Close a device such that the handle cannot be used again. Your backend
  * should destroy any resources that were allocated in the open path.
  * This may also be a good place to call usbi_remove_pollfd() to inform
@@ -1020,7 +1061,9 @@ static void op_close(struct libusb_device_handle *handle)
     usbd_device_instance_t instance;
 
     int devno, busno, ifno;
-    busno = dev->bus_number, devno = dev->device_address, ifno = 0;
+    busno = dev->bus_number;
+    devno = dev->device_address;
+    ifno = 0;
 
     int status;
 
@@ -1033,9 +1076,7 @@ static void op_close(struct libusb_device_handle *handle)
     {
         struct claimed_interfaces_list * node = 
             TAILQ_FIRST(&dpriv->claimed_interfaces);
-
-        TAILQ_REMOVE(&dpriv->claimed_interfaces, node, chain);
-        free(node);
+        op_release_interface(handle, node->claimed_interface);
     }
 
     /* cleanup pipe */
@@ -1259,6 +1300,11 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer, unsigned char u
 
     unsigned char * usbd_buffer;
 
+    struct usbd_device * usbd_device = NULL;
+    int configuration = -1;
+    int ifno = -1;
+    int alt = -1;
+
     /* Check the endpoint address */
     if (dir == URB_DIR_IN) {
         if ((transfer->endpoint & USB_ENDPOINT_IN) != USB_ENDPOINT_IN) {
@@ -1274,58 +1320,35 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer, unsigned char u
         }
     }
 
-    int config = dpriv->selected_configuration;
-    if ( config == -1 ) 
-    {
-        usbi_dbg("Didn't know what configuration was being used,"
-                 " sending out control transfer to request the information");
-        /* if we haven't explicitly selected a configuration, find out
-           what configuration the device is using */
-        libusb_get_configuration(dev_handle, &config);
-        dpriv->selected_configuration = config;
+    status = get_endpoint_config_path(dev_handle, transfer->endpoint,
+                                      &usbd_device,
+                                      &configuration, &ifno, &alt);
+
+    if (status != LIBUSB_SUCCESS) {
+        return status;
     }
 
-    int ifno = hpriv->interface_number;
-    if ( ifno == -1 )
-    {
-        usbi_dbg("Didn't know the interface number,"
-                 " but it should have been claimed. Trying to DWYM with interface 0.");
-        /* well an interface SHOULD have been selected but just
-           incase we will assume interface 0 */
-        ifno = 0;
-    }
-
-    int alt = hpriv->alt;
-    if ( alt == -1 )
-    {
-        usbi_dbg("Didn't know what alt setting to use,"
-                 " but it should have been set by select_interface. Trying to DWYM with alt 0.");
-        /* if no explicit altsetting, assume 0 */
-        alt = 0;
-    }
-
-    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor( dpriv->usbd_device,
-                                                          config,
+    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor( usbd_device,
+                                                          configuration,
                                                           ifno,
                                                           alt,
                                                           transfer->endpoint,
                                                           &usbd_dn );
 
     if (ud == 0) {
-        /* TODO: support this kind of error */
         usbi_err(ITRANSFER_CTX(itransfer), "usbd_endpoint_descriptor failed");
         usbi_dbg("usbd_endpoint_descriptor args: "
-                 "dpriv->usbd_device: %x, "
+                 "usbd_device: %x, "
                  "config: %x, "
                  "ifno: %d, "
                  "alt: %d, "
                  "transfer->endpoint: %x",
-                 dpriv->usbd_device, config, ifno, alt, transfer->endpoint);
-        /* TODO: what kind of error should this be? */
-        return LIBUSB_ERROR_OTHER;
+                 usbd_device, configuration,
+                 ifno, alt, transfer->endpoint);
+        return LIBUSB_ERROR_INVALID_PARAM;
     }
 
-    status = usbd_open_pipe(dpriv->usbd_device, ud, &bulk_pipe);
+    status = usbd_open_pipe(usbd_device, ud, &bulk_pipe);
     if (status != EOK) {
         /* TODO: Support this kind of error */
         usbi_err(ITRANSFER_CTX(itransfer), "usbd_open_pipe failed");
@@ -1426,7 +1449,11 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer)
 
     char * bytes = transfer->buffer;
     unsigned char * usbd_buffer;
-    
+
+    struct usbd_device * usbd_device = NULL;
+    int configuration = -1;
+    int ifno = -1;
+    int alt = -1;
 
     int status;
 
@@ -1446,55 +1473,29 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer)
     }
 
     /* 2.1 confirm configuration */
+    status = get_endpoint_config_path(dev_handle, transfer->endpoint,
+                                      &usbd_device,
+                                      &configuration, &ifno, &alt);
 
-    int config = dpriv->selected_configuration;
-    if ( config == -1 ) 
-    {
-        usbi_dbg("Didn't know what configuration to use,"
-                 " sending out control transfer to figure it out.");
-        /* if we haven't explicitly selected a configuration, find out
-           what configuration the device is using */
-        libusb_get_configuration(dev_handle, &config);
-        dpriv->selected_configuration = config;
-    }
-
-    int ifno = hpriv->interface_number;
-    if ( ifno == -1 )
-    {
-        usbi_dbg("Didn't know what interface setting to use,"
-                 " but it should have been set. Trying to DWYM with interface 0.");
-
-        /* well an interface SHOULD have been selected but just
-           incase we will assume interface 0 */
-        ifno = 0;
-    }
-
-    int alt = hpriv->alt;
-    if ( alt == -1 )
-    {
-        usbi_dbg("Didn't know what alt setting to use,"
-                 " but it should have been set by select_interface. Trying to DWYM with alt 0.");
-        /* if no explicit altsetting, assume 0 */
-        alt = 0;
+    if (status != LIBUSB_SUCCESS) {
+        return status;
     }
 
     /* 2.2 Determine endpoint */
-    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor( dpriv->usbd_device,                          
-                                                          config,
+    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor( usbd_device,
+                                                          configuration,
                                                           ifno,
                                                           alt,
                                                           transfer->endpoint,
                                                           &usbd_dn );
-    
+
     if (ud == 0) {
-        /* TODO: support this kind of error */
         usbi_err(ITRANSFER_CTX(itransfer), "usbd_endpoint_descriptor failed");
-        /* TODO: what kind of error should this be? */
-        return LIBUSB_ERROR_OTHER;
+        return LIBUSB_ERROR_INVALID_PARAM;
     }
 
     /* 3. open pipe */
-    status = usbd_open_pipe(dpriv->usbd_device, ud, &iso_pipe);
+    status = usbd_open_pipe(usbd_device, ud, &iso_pipe);
     if (status != EOK) {
         /* TODO: Support this kind of error */
         usbi_err(ITRANSFER_CTX(itransfer), "usbd_open_pipe failed");
@@ -1905,6 +1906,9 @@ static int op_claim_interface(struct libusb_device_handle *handle, int iface)
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
     struct claimed_interfaces_list * node;
+    struct claimed_interfaces_list * new_node;
+    usbd_device_instance_t instance;
+    int iface_found;
 
     /* Does this interface exist? */
     r = libusb_get_active_config_descriptor(handle->dev, &config);
@@ -1913,7 +1917,7 @@ static int op_claim_interface(struct libusb_device_handle *handle, int iface)
         return r;
     }
     usbi_dbg("config->bNumInterfaces = %d, iface = %d", config->bNumInterfaces, iface);
-    int iface_found = iface < config->bNumInterfaces;
+    iface_found = iface < config->bNumInterfaces;
     free(config);
     if (!iface_found)
     {
@@ -1921,37 +1925,45 @@ static int op_claim_interface(struct libusb_device_handle *handle, int iface)
     }
 
     /* Find out if we claimed it already */
-    int used = 0;
     TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain)
     {
         if (node->claimed_interface == iface)
         {
             /* already claimed! */
-            used = 1;
+            usbi_dbg("Interface %d already claimed on device", iface);
+            return LIBUSB_ERROR_BUSY;
         }
     }
-    
-    /* If we haven't claimed it already, claim it */
-    if (!used)
-    {
-        /* Calloc to ensure that the TAILQ pointers are null */
-        struct claimed_interfaces_list * new_node = 
-            (struct claimed_interfaces_list *)calloc(1, sizeof(struct claimed_interfaces_list));
 
-        TAILQ_INSERT_TAIL(&dpriv->claimed_interfaces, new_node, chain);
-
-        hpriv->interface_number = iface;
-        return 0;
-    } 
-    else
-    {
-        return LIBUSB_ERROR_BUSY;
+    /* Calloc to ensure that the TAILQ pointers are null */
+    new_node = calloc(1, sizeof(struct claimed_interfaces_list));
+    if (!new_node) {
+        usbi_dbg("Failed to allocate linked list structure");
+        return LIBUSB_ERROR_NO_MEM;
     }
 
-    /* TODO: should this try and claim the interface through the
-       underlying driver? Probably*/
+    new_node->claimed_interface = iface;
+    new_node->alt_setting = 0;
 
-    return 0;
+    usbi_dbg("Attaching to device interface");
+    memset(&instance, USBD_CONNECT_WILDCARD, sizeof(usbd_device_instance_t));
+    instance.path = handle->dev->bus_number;
+    instance.devno = handle->dev->device_address;
+    instance.iface = iface;
+
+    /* Need to open a usbd_device instance for this interface to
+     * tell usbd that it is claimed. */
+    r = usbd_attach(global_connection, &instance, 0,
+                    &new_node->usbd_device);
+    if (r != EOK) {
+        usbi_dbg ("Failed to attach to device interface: %d", r);
+        free(new_node);
+        return qnx_err_to_libusb(r);
+    }
+
+    TAILQ_INSERT_TAIL(&dpriv->claimed_interfaces, new_node, chain);
+
+    return LIBUSB_SUCCESS;
 }
 
 /* Release a previously claimed interface.
@@ -1988,13 +2000,20 @@ static int op_release_interface(struct libusb_device_handle *handle, int iface)
     if (r_node != NULL)
     {
         TAILQ_REMOVE(&dpriv->claimed_interfaces, r_node, chain);
+        if (r_node->usbd_device != 0) {
+            /* Set the alternate setting back to 0. */
+            r = usbd_select_interface(r_node->usbd_device,
+                                      r_node->claimed_interface, 0);
+            if (r != EOK) {
+              usbi_dbg("Failed to restore alternate setting for %d: %d",
+                       r_node->claimed_interface, r);
+            }
+        }
+        r = usbd_detach(r_node->usbd_device);
+        r_node->usbd_device = NULL;
+        free(r_node);
     }
 
-    /* TODO: select the default interface with usbd_select_interface */
-    hpriv->interface_number = -1;
-    hpriv->alt = -1;
-    r = usbd_select_interface(dpriv->usbd_device, 0, 0);
-    
     return qnx_err_to_libusb(r);
 }
 
@@ -2093,35 +2112,31 @@ static int op_set_interface_altsetting(struct libusb_device_handle *handle,
 {
     int r;
     struct libusb_config_descriptor *config;
+    struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
+    struct claimed_interfaces_list * interface_claim = NULL;
+    struct claimed_interfaces_list * node;
 
-    /* Does this interface exist? */
-    r = libusb_get_active_config_descriptor(handle->dev, &config);
-    if (r != 0)
-    {
-        return r;
+    /* Find the claimed interface information */
+    TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain) {
+      if (node->claimed_interface == iface) {
+          interface_claim = node;
+      }
     }
-    usbi_dbg("config->bNumInterfaces = %d, iface = %d", config->bNumInterfaces, iface);
-    int iface_found = iface < config->bNumInterfaces;
-    free(config);
-    if (!iface_found)
-    {
+
+    if (interface_claim == NULL) {
+        usbi_dbg("Failed to find previous claim for interface %d", iface);
         return LIBUSB_ERROR_NOT_FOUND;
     }
 
-    struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
+    r = usbd_select_interface(interface_claim->usbd_device,
+                              iface, altsetting);
 
-    r = usbd_select_interface(dpriv->usbd_device, iface, altsetting);
-
-    if (r != EOK) 
-    {
-        return qnx_err_to_libusb(r);
+    if (r == EOK) {
+      interface_claim->alt_setting = altsetting;
     }
 
-    hpriv->alt = altsetting;
-
-    /* TODO: ensure this is a libusb error and not an ERRNO */
-    return r;
+    return qnx_err_to_libusb(r);
 }
 
 /* Clear a halt/stall condition on an endpoint.
@@ -2146,38 +2161,20 @@ static int op_clear_halt(struct libusb_device_handle *handle, unsigned char endp
 
     int r;
 
-    int configuration = dpriv->selected_configuration;
-    if ( configuration == -1 ) 
-    {
-        usbi_dbg("Didn't know what configuration to use,"
-                 " sending out control transfer to figure it out.");
-        /* if we haven't explicitly selected a configuration, find out
-           what configuration the device is using */
-        libusb_get_configuration(handle, &configuration);
-        dpriv->selected_configuration = configuration;
-    }
+    struct usbd_device * usbd_device = NULL;
+    int configuration = -1;
+    int ifno = -1;
+    int alt = -1;
 
-    int ifno = hpriv->interface_number;
-    if ( ifno == -1 )
-    {
-        usbi_dbg("Didn't know the interface number,"
-                 " but it should have been claimed. Trying to DWYM with interface 0.");
-        /* well an interface SHOULD have been selected but just
-           incase we will assume interface 0 */
-        ifno = 0;
-    }
+    r = get_endpoint_config_path(handle, endpoint,
+                                 &usbd_device, &configuration, &ifno, &alt);
 
-    int alt = hpriv->alt;
-    if ( alt == -1 )
-    {
-        usbi_dbg("Didn't know what alt setting to use,"
-                 " but it should have been set by select_interface. Trying to DWYM with alt 0.");
-        /* if no explicit altsetting, assume 0 */
-        alt = 0;
+    if (r != LIBUSB_SUCCESS) {
+        return r;
     }
 
     ud = (usbd_descriptors_t *) 
-        usbd_endpoint_descriptor(dpriv->usbd_device,
+        usbd_endpoint_descriptor(usbd_device,
                                  configuration,
                                  ifno,
                                  alt,
@@ -2190,7 +2187,7 @@ static int op_clear_halt(struct libusb_device_handle *handle, unsigned char endp
         return LIBUSB_ERROR_NO_MEM;
     }
 
-    r = usbd_open_pipe(dpriv->usbd_device, ud, &ep_pipe);
+    r = usbd_open_pipe(usbd_device, ud, &ep_pipe);
     if (r != EOK) {
         /* TODO: Support this kind of error */
         usbi_err(HANDLE_CTX(handle), "usbd_open_pipe failed");

@@ -54,6 +54,8 @@
 struct claimed_interfaces_list {
     TAILQ_ENTRY(claimed_interfaces_list) chain;
     int claimed_interface;
+    struct usbd_device * usbd_device; /**< Claimed USB device. */
+    int alt_setting;
 };
 
 struct nto_qnx_device_priv
@@ -68,15 +70,8 @@ struct nto_qnx_device_priv
 
 struct nto_qnx_device_handle_priv
 {
-    /* Don't need this here anymore: */
-    /* struct nu_dev * nu_dev; */
-
-    /* TODO: Potential idea for this memory may be the control pipe
-       that's currently opened as part of the, insertion callback */
     struct usbd_pipe * control_pipe; /**< device control pipe */
     int fds[2];                  /* file descriptors returned from pipe() */
-    int interface_number;
-    int alt;
 };
 
 struct nto_qnx_transfer_priv
