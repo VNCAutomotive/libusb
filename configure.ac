@@ -93,6 +93,11 @@ case $host in
 	AC_MSG_RESULT([Haiku])
 	backend="haiku"
 	threads="posix"
+        ;;
+*-nto-qnx*)
+	AC_MSG_RESULT([QNX])
+	backend="nto-qnx"
+	threads="posix"
 	;;
 *)
 	AC_MSG_ERROR([unsupported operating system])
@@ -185,6 +190,14 @@ haiku)
 	AC_CHECK_HEADERS([poll.h])
 	AC_DEFINE([POLL_NFDS_TYPE],[nfds_t],[type of second poll() argument])
 	;;
+nto-qnx)
+	AC_DEFINE(OS_NTO_QNX, 1, [QNX backend])
+	AC_SUBST(OS_NTO_QNX)
+	THREAD_CFLAGS=""
+	PC_LIBS_PRIVATE="-lusbdi"
+	AC_CHECK_HEADERS([poll.h])
+	AC_DEFINE([POLL_NFDS_TYPE],[nfds_t],[type of second poll() argument])
+	;;
 esac
 
 AC_SUBST(LIBS)
@@ -195,6 +208,7 @@ AM_CONDITIONAL(OS_OPENBSD, test "x$backend" = xopenbsd)
 AM_CONDITIONAL(OS_NETBSD, test "x$backend" = xnetbsd)
 AM_CONDITIONAL(OS_WINDOWS, test "x$backend" = xwindows)
 AM_CONDITIONAL(OS_HAIKU, test "x$backend" = xhaiku)
+AM_CONDITIONAL(OS_NTO_QNX, test "x$backend" = xnto-qnx)
 AM_CONDITIONAL(THREADS_POSIX, test "x$threads" = xposix)
 AM_CONDITIONAL(CREATE_IMPORT_LIB, test "x$create_import_lib" = "xyes")
 AM_CONDITIONAL(USE_UDEV, test "x$enable_udev" = xyes)

@@ -19,6 +19,7 @@ WINDOWS_USBDK_SRC = os/windows_usbdk.h os/windows_usbdk.c
 WINCE_USB_SRC = os/wince_usb.h os/wince_usb.c
 HAIKU_USB_SRC = os/haiku_usb.h os/haiku_usb_backend.cpp \
 		os/haiku_usb_raw.h os/haiku_usb_raw.cpp os/haiku_pollfs.cpp
+NTO_QNX_USB_SRC = os/nto_qnx_usbfs.c
 
 EXTRA_DIST = $(POSIX_POLL_SRC) $(POSIX_THREADS_SRC) \
 	$(WINDOWS_POLL_SRC) $(WINDOWS_THREADS_SRC) \
@@ -26,6 +27,7 @@ EXTRA_DIST = $(POSIX_POLL_SRC) $(POSIX_THREADS_SRC) \
 	$(OPENBSD_USB_SRC) $(NETBSD_USB_SRC) \
 	$(WINDOWS_COMMON_SRC) $(WINDOWS_USB_SRC) $(WINDOWS_USBDK_SRC) \
         $(WINCE_USB_SRC) $(HAIKU_USB_SRC) \
+	$(NTO_QNX_USB_SRC)
 	os/linux_udev.c os/linux_netlink.c
 
 if OS_LINUX
@@ -55,6 +57,10 @@ if OS_HAIKU
 noinst_LTLIBRARIES = libusb_haiku.la
 libusb_haiku_la_SOURCES = $(HAIKU_USB_SRC)
 libusb_1_0_la_LIBADD = libusb_haiku.la
+endif
+
+if OS_NTO_QNX
+OS_SRC = $(NTO_QNX_USB_SRC)
 endif
 
 if OS_WINDOWS
