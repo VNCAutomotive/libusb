@@ -165,6 +165,18 @@ static int qnx_err_to_libusb(int error)
     }
 }
 
+static struct claimed_interfaces_list* find_claimed_interface(
+            struct nto_qnx_device_priv *dpriv, int iface)
+{
+    struct claimed_interfaces_list * node;
+    TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain) {
+      if (node->claimed_interface == iface) {
+          return node;
+      }
+    }
+    return NULL;
+}
+
 static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
 {
     _uint32 urb_masked = USBD_URB_STATUS_MASK & ustatus & ~USBD_STATUS_CMP_ERR;
@@ -1924,15 +1936,10 @@ static int op_claim_interface(struct libusb_device_handle *handle, int iface)
         return LIBUSB_ERROR_NOT_FOUND;
     }
 
-    /* Find out if we claimed it already */
-    TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain)
-    {
-        if (node->claimed_interface == iface)
-        {
-            /* already claimed! */
-            usbi_dbg("Interface %d already claimed on device", iface);
-            return LIBUSB_ERROR_BUSY;
-        }
+    if (find_claimed_interface(dpriv, iface) != NULL) {
+        /* already claimed! */
+        usbi_dbg("Interface %d already claimed on device", iface);
+        return LIBUSB_ERROR_BUSY;
     }
 
     /* Calloc to ensure that the TAILQ pointers are null */
@@ -1986,16 +1993,8 @@ static int op_release_interface(struct libusb_device_handle *handle, int iface)
     int r;
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
-    struct claimed_interfaces_list * r_node = NULL;
-    struct claimed_interfaces_list * node;
-
-    TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain)
-    {
-        if (node->claimed_interface == iface)
-        {
-            r_node = node;
-        }
-    }
+    struct claimed_interfaces_list * r_node =
+      find_claimed_interface(dpriv, iface);
 
     if (r_node != NULL)
     {
@@ -2114,15 +2113,8 @@ static int op_set_interface_altsetting(struct libusb_device_handle *handle,
     struct libusb_config_descriptor *config;
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
-    struct claimed_interfaces_list * interface_claim = NULL;
-    struct claimed_interfaces_list * node;
-
-    /* Find the claimed interface information */
-    TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain) {
-      if (node->claimed_interface == iface) {
-          interface_claim = node;
-      }
-    }
+    struct claimed_interfaces_list * interface_claim =
+      find_claimed_interface(dpriv, iface);
 
     if (interface_claim == NULL) {
         usbi_dbg("Failed to find previous claim for interface %d", iface);
