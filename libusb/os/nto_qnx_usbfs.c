@@ -362,36 +362,97 @@ static void *urb_polling_thread_main(void *arg0)
     return NULL;
 }
 
+static int update_mappings(struct libusb_device_handle *handle) {
+    struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
+    struct libusb_config_descriptor * config;
+    int i, j, k;
+    int r;
+
+    /* Reset all the values */
+    for(i = 0; i < NTO_QNX_MAX_ENDPOINT_COUNT; ++i) {
+        dpriv->in_ep_to_iface[i] = -1;
+        dpriv->out_ep_to_iface[i] = -1;
+    }
+
+    /* Read and parse the config descriptor */
+    r = libusb_get_active_config_descriptor(handle->dev, &config);
+    if (r != LIBUSB_SUCCESS) {
+        return r;
+    }
+    for (i = 0; i < config->bNumInterfaces; ++i) {
+      const struct libusb_interface *ifaces =
+        &config->interface[i];
+      for (j = 0; j < ifaces->num_altsetting; ++j) {
+        const struct libusb_interface_descriptor *iface_desc =
+          &ifaces->altsetting[j];
+        for (k = 0; k < iface_desc->bNumEndpoints; ++k) {
+          const struct libusb_endpoint_descriptor *ep_desc = 
+            &iface_desc->endpoint[k];
+          const int endpoint_addr = ep_desc->bEndpointAddress &
+            LIBUSB_ENDPOINT_ADDRESS_MASK;
+          if (ep_desc->bEndpointAddress & LIBUSB_ENDPOINT_IN) {
+            dpriv->in_ep_to_iface[endpoint_addr] =
+              iface_desc->bInterfaceNumber;
+          } else {
+            dpriv->out_ep_to_iface[endpoint_addr] =
+              iface_desc->bInterfaceNumber;
+          }
+        }
+      }
+    }
+    libusb_free_config_descriptor(config);
+    config = NULL;
+
+    return r;
+}
+
 /* Finds the correct configuration, interface and alternate setting
  * for the given endpoint. */
 static int get_endpoint_config_path(struct libusb_device_handle *handle,
                                     unsigned char endpoint,
                                     struct usbd_device ** usbd_device,
-                                    int *configuration,
+                                    int * configuration,
                                     int * iface,
                                     int * alt_setting)
 {
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
+    struct claimed_interfaces_list * claimed_iface = NULL;
+    const int endpoint_addr = endpoint & LIBUSB_ENDPOINT_ADDRESS_MASK;
     int r = LIBUSB_SUCCESS;
-    *configuration = dpriv->selected_configuration;
-    if ( *configuration == -1 ) 
-    {
-        usbi_dbg("Didn't know what configuration to use,"
-                 " sending out control transfer to figure it out.");
-        /* if we haven't explicitly selected a configuration, find out
-           what configuration the device is using */
-        libusb_get_configuration(handle, configuration);
-        dpriv->selected_configuration = *configuration;
-    }
+
     *usbd_device = NULL;
+    *configuration = -1;
     *iface = -1;
     *alt_setting = -1;
-    r = LIBUSB_ERROR_INVALID_PARAM;
 
-    usbi_dbg("Failed to discover config path for endpoint %d: "
-             "got %d->%d->%d",
-             endpoint, *configuration, *iface, *alt_setting);
+    *configuration = dpriv->selected_configuration;
+
+    if (endpoint & LIBUSB_ENDPOINT_IN) {
+        *iface = dpriv->in_ep_to_iface[endpoint_addr];
+    } else {
+        *iface = dpriv->out_ep_to_iface[endpoint_addr];
+    }
+
+    if (*iface != -1) {
+        /* Found an interface so find its claimed information. */
+        claimed_iface = find_claimed_interface(dpriv, *iface);
+    }
+    if (claimed_iface) {
+        /* Use the claimed information to find the device to use. */
+        *usbd_device = claimed_iface->usbd_device;
+        *alt_setting = claimed_iface->alt_setting;
+    }
+
+    if (*usbd_device == NULL ||
+        *configuration == -1 ||
+        *iface == -1 ||
+        *alt_setting == -1) {
+      usbi_dbg("Failed to discover config path for endpoint %d: "
+               "got %d->%d->%d",
+               endpoint, *configuration, *iface, *alt_setting);
+      r = LIBUSB_ERROR_INVALID_PARAM;
+    }
+
     return r;
 
 }
@@ -621,16 +682,14 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum, uint8_t 
     /* TODO: handle error conditions as well as alternate configurations */
 
     /* We are going to guess that current configuration used is the
-       first (configuration index 0) but we are also going to indicate that
-       we aren't sure by putting -1 in selected configuration. When we
-       ask later for the active configuration with the
-       op_get_configuration function it will check for -1 and use a
-       control packet to get the configuration if we aren't sure */
-    priv->selected_configuration = -1;
+     * first (configuration index 0).
+     * TODO: work out a way to find this value. */
+    priv->selected_configuration = 0;
     r = read_configuration(&priv->config_descriptor, dev, 0);
-    
-    /* priv->config_descriptor = config_buffer; */
 
+    if (r == LIBUSB_SUCCESS) {
+        r = update_mappings(handle);
+    }
 
     priv->connection = global_ro_connection;
     TAILQ_INIT(&priv->claimed_interfaces);
@@ -650,19 +709,19 @@ static int enumerate_device(struct libusb_context *ctx, struct discovered_devs *
     struct libusb_device *dev;
     unsigned long session_id;
     int need_unref = 0;
-    
+
     /* === internal === */
     int r = 0;
 
-    /* This session id should be relatively unique 
-       
+    /* This session id should be relatively unique.
+
        TODO: is there an actual assigned session id I can
        use?*/
     session_id = busnum << 8 | devaddr;
-    
+
     usbi_dbg("busnum %d devaddr %d session_id %ld", busnum, devaddr, 
              session_id);
-    
+
     dev = usbi_get_device_by_session_id(ctx, session_id);
     if (dev)
     {
@@ -673,11 +732,11 @@ static int enumerate_device(struct libusb_context *ctx, struct discovered_devs *
     {
         usbi_dbg("allocating new device for %d/%d (session %ld)",
                  busnum, devaddr, session_id);
-        
+
         dev = usbi_alloc_device(ctx, session_id);
         if (!dev) return LIBUSB_ERROR_NO_MEM;
         need_unref = 1;
-        
+
         /* initialize device */
         r = initialize_device(dev, busnum, devaddr, usbd_d);
 
@@ -2079,11 +2138,17 @@ static int op_set_configuration(struct libusb_device_handle *handle, int config)
 
     dpriv->selected_configuration = config;
     free(dpriv->config_descriptor);
-    
-    r = read_configuration(&dpriv->config_descriptor, handle->dev, config);
-    /* TODO: handle error conditions */
 
-    return 0;
+    r = read_configuration(&dpriv->config_descriptor, handle->dev, config);
+
+    if (r == EOK) {
+        int status = update_mappings(handle);
+        if (status != LIBUSB_SUCCESS) {
+            return status;
+        }
+    }
+
+    return qnx_err_to_libusb(r);
 }
 
 /* Set the alternate setting for an interface.

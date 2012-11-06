@@ -38,18 +38,7 @@
 #include "libusb.h"
 #include "libusbi.h"
 
-/* The TIMEVAL_TO_TIMESPEC and TIMESPEC_TO_TIMEVAL macros should be in
-   sys/time.h ideally, they are here in the meantime */
-
-/* Macros for converting between `struct timeval' and `struct timespec'.  */
-# define TIMEVAL_TO_TIMESPEC(tv, ts) {                                   \
-        (ts)->tv_sec = (tv)->tv_sec;                                    \
-        (ts)->tv_nsec = (tv)->tv_usec * 1000;                           \
-}
-# define TIMESPEC_TO_TIMEVAL(tv, ts) {                                   \
-        (tv)->tv_sec = (ts)->tv_sec;                                    \
-        (tv)->tv_usec = (ts)->tv_nsec / 1000;                           \
-}
+#define NTO_QNX_MAX_ENDPOINT_COUNT 16
 
 struct claimed_interfaces_list {
     TAILQ_ENTRY(claimed_interfaces_list) chain;
@@ -65,6 +54,10 @@ struct nto_qnx_device_priv
     struct usbd_device * usbd_device; /**< pointer to QNX USB device structure */
     struct usbd_connection * connection; /**< pointer to QNX USB device structure */
     int selected_configuration;
+    /* Maps in endpoints to their owning interfaces */
+    int in_ep_to_iface[NTO_QNX_MAX_ENDPOINT_COUNT];
+    /* Maps out endpoints to their owning interfaces*/
+    int out_ep_to_iface[NTO_QNX_MAX_ENDPOINT_COUNT];
     TAILQ_HEAD(, claimed_interfaces_list) claimed_interfaces;
 };
 
