@@ -1292,9 +1292,7 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer, unsigned char u
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct libusb_device_handle *dev_handle = transfer->dev_handle;
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(dev_handle);
-    struct nto_qnx_device_priv *dpriv = __device_priv(dev_handle->dev);
-    
+
     /* === internal === */
     struct usbd_desc_node * usbd_dn;
     struct usbd_pipe * bulk_pipe;
@@ -1449,8 +1447,6 @@ static int submit_iso_transfer(struct usbi_transfer *itransfer)
     struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct libusb_device_handle *dev_handle = transfer->dev_handle;
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(dev_handle);
-    struct nto_qnx_device_priv *dpriv = __device_priv(dev_handle->dev);
 
     /* === internal === */
     struct usbd_urb * urb;
@@ -1916,8 +1912,6 @@ static int op_claim_interface(struct libusb_device_handle *handle, int iface)
     int r;
     struct libusb_config_descriptor *config;
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
-    struct claimed_interfaces_list * node;
     struct claimed_interfaces_list * new_node;
     usbd_device_instance_t instance;
     int iface_found;
@@ -1992,26 +1986,26 @@ static int op_release_interface(struct libusb_device_handle *handle, int iface)
 {
     int r;
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
     struct claimed_interfaces_list * r_node =
       find_claimed_interface(dpriv, iface);
 
-    if (r_node != NULL)
-    {
-        TAILQ_REMOVE(&dpriv->claimed_interfaces, r_node, chain);
-        if (r_node->usbd_device != 0) {
-            /* Set the alternate setting back to 0. */
-            r = usbd_select_interface(r_node->usbd_device,
-                                      r_node->claimed_interface, 0);
-            if (r != EOK) {
-              usbi_dbg("Failed to restore alternate setting for %d: %d",
-                       r_node->claimed_interface, r);
-            }
-        }
-        r = usbd_detach(r_node->usbd_device);
-        r_node->usbd_device = NULL;
-        free(r_node);
+    if (r_node == NULL) {
+        return LIBUSB_ERROR_NOT_FOUND;
     }
+
+    TAILQ_REMOVE(&dpriv->claimed_interfaces, r_node, chain);
+    if (r_node->usbd_device != 0) {
+      /* Set the alternate setting back to 0. */
+      r = usbd_select_interface(r_node->usbd_device,
+                                r_node->claimed_interface, 0);
+      if (r != EOK) {
+        usbi_dbg("Failed to restore alternate setting for %d: %d",
+                 r_node->claimed_interface, r);
+      }
+    }
+    r = usbd_detach(r_node->usbd_device);
+    r_node->usbd_device = NULL;
+    free(r_node);
 
     return qnx_err_to_libusb(r);
 }
@@ -2110,9 +2104,7 @@ static int op_set_interface_altsetting(struct libusb_device_handle *handle,
                                         int iface, int altsetting)
 {
     int r;
-    struct libusb_config_descriptor *config;
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
     struct claimed_interfaces_list * interface_claim =
       find_claimed_interface(dpriv, iface);
 
@@ -2142,11 +2134,9 @@ static int op_set_interface_altsetting(struct libusb_device_handle *handle,
  *   was opened
  * - another LIBUSB_ERROR code on other failure
  */
-static int op_clear_halt(struct libusb_device_handle *handle, unsigned char endpoint)
+static int op_clear_halt(struct libusb_device_handle *handle,
+                         unsigned char endpoint)
 {
-    struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
-    struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(handle);
-
     usbd_descriptors_t * ud;
     struct usbd_desc_node * usbd_dn;
     struct usbd_pipe *ep_pipe;
@@ -2174,19 +2164,18 @@ static int op_clear_halt(struct libusb_device_handle *handle, unsigned char endp
                                  &usbd_dn);
 
     if (ud == 0) {
-        /* TODO: support this kind of error */
         usbi_err(HANDLE_CTX(handle), "usbd_endpoint_descriptor failed");
         return LIBUSB_ERROR_NO_MEM;
     }
 
     r = usbd_open_pipe(usbd_device, ud, &ep_pipe);
     if (r != EOK) {
-        /* TODO: Support this kind of error */
         usbi_err(HANDLE_CTX(handle), "usbd_open_pipe failed");
         return qnx_err_to_libusb(r);
     }
 
     /* Clear the stall/halt */
+    /* TODO: check error code */
     usbd_reset_pipe(ep_pipe);
     usbd_close_pipe(ep_pipe);
 
