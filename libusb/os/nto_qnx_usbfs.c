@@ -671,7 +671,6 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum, uint8_t 
 
     r = update_mappings(dev);
 
-    priv->connection = global_ro_connection;
     TAILQ_INIT(&priv->claimed_interfaces);
 
     return r;
@@ -982,83 +981,19 @@ static int op_get_config_descriptor(struct libusb_device *dev,
 
 static int op_open(struct libusb_device_handle *handle)
 {
-    /* === libusb === */
-    struct libusb_device * dev = handle->dev;
     struct nto_qnx_device_handle_priv * hpriv = __device_handle_priv(handle);
     struct nto_qnx_device_priv * dpriv = __device_priv(handle->dev);
 
-    /* === internal === */
     int r = 0;
     int status;
-    int devno, busno, ifno;
-    struct usbd_connection * usbd_c;
-    struct usbd_device * usbd_d;
-    usbd_device_instance_t instance;
 
-    /* vars required for getting the control pipe */
     usbd_descriptors_t * ud;
     struct usbd_desc_node * usbd_dn;
     struct usbd_pipe * u_pipe;
 
-    /* find internal device struct, don't care which interface */
-    busno = dev->bus_number;
-    devno = dev->device_address;
-    ifno = 0;
-
-    usbd_c = dpriv->connection;
-    usbd_d = dpriv->usbd_device;
-    
-    /* Check if we have write privileges  */
-    usbi_dbg ("Checking if we have write privileges");
-
-    if (usbd_c == global_ro_connection) /* compare pointers */
-    {
-        /* The device may have been connected through the use of a
-           connection to the usb stack which is read only, so try
-           detaching and re-attaching using the read-write connection
-           instead */
-
-        /* === detaching === */
-        /* TODO: ensure that no io is occuring otherwise this will fail */
-        if (usbd_d != NULL)
-        {
-            usbi_dbg ("Detaching usbd_device, since it is probably read only");
-
-            status = usbd_detach(usbd_d);
-            if (status != EOK) {
-                usbi_err(HANDLE_CTX(handle), "usbd_detach() failed, error = %s", strerror(status));
-                return qnx_err_to_libusb(status);
-            }
-        }
-
-        /* === Re-attaching === */
-
-        /* Make an instance manually */
-        usbi_dbg ("Now working on attaching/reattaching the device to the stack");
-        memset(&instance, USBD_CONNECT_WILDCARD, sizeof(usbd_device_instance_t));
-        instance.path = busno;
-        instance.devno = devno;
-
-        status = usbd_attach(global_connection, &instance, 0, &usbd_d);
-        if (status != EOK) {
-            dpriv->usbd_device = NULL;
-            if (usb_debug >= 2) {
-                usbi_info(HANDLE_CTX(handle), "usbd_attach() failed, error = %s", strerror(status));
-            }
-            return qnx_err_to_libusb(status);
-        }
-        else 
-        {
-            /* Successfully connected, thereby upgrading privileges to
-               read-write. Now update structures. */
-            dpriv->usbd_device = usbd_d;
-            dpriv->connection = global_connection;
-        }
-
-    }
-
     /* get a pointer to the control endpoint descriptor */
-    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor(usbd_d, 1, 0, 0, 0,
+    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor(dpriv->usbd_device,
+                                                         1, 0, 0, 0,
                                                          &usbd_dn);
     if (ud == 0) {
 
@@ -1068,7 +1003,7 @@ static int op_open(struct libusb_device_handle *handle)
     }
 
     /* open the control pipe */
-    status = usbd_open_pipe(usbd_d, ud, &u_pipe);
+    status = usbd_open_pipe(dpriv->usbd_device, ud, &u_pipe);
     if (status != EOK) {
         usbi_err(HANDLE_CTX(handle), "usbd_open_pipe() failed");
         /* TODO: cleanup */
@@ -1143,37 +1078,6 @@ static void op_close(struct libusb_device_handle *handle)
             usbi_err(HANDLE_CTX(handle), "could not close pipe, error = %s", strerror(status));
         } else {
             hpriv->control_pipe = NULL;
-        }
-    }
-
-    /* detatch from r/w connection and connect to ro */
-    if (dpriv->connection == global_connection) /* compare pointers */
-    {
-        if (dpriv->usbd_device != NULL)
-        {
-            usbi_dbg("Detaching usb device from r/w connection");
-            status = usbd_detach(dpriv->usbd_device);
-            if (status != EOK)
-            {
-                usbi_err(HANDLE_CTX(handle), "usbd_detach() failed, error = %s", strerror(status));
-                return;
-            }
-        }
-
-        usbi_dbg("Now working on reattaching to r/o connection");
-        memset(&instance, USBD_CONNECT_WILDCARD, sizeof(usbd_device_instance_t));
-        instance.path = busno, instance.devno = devno;
-            
-        status = usbd_attach(global_ro_connection, &instance, 0, &dpriv->usbd_device);
-        if (status != EOK)
-        {
-            dpriv->usbd_device = NULL;
-            usbi_dbg("usbd_attach() failed, error = %s", strerror(status));
-            return;
-        }
-        else
-        {
-            dpriv->connection = global_ro_connection;
         }
     }
 

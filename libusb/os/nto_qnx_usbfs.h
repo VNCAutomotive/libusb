@@ -52,7 +52,6 @@ struct nto_qnx_device_priv
     unsigned char * dev_descriptor;
     unsigned char * config_descriptor;
     struct usbd_device * usbd_device; /**< pointer to QNX USB device structure */
-    struct usbd_connection * connection; /**< pointer to QNX USB device structure */
     int selected_configuration;
     /* Maps in endpoints to their owning interfaces */
     int in_ep_to_iface[NTO_QNX_MAX_ENDPOINT_COUNT];
