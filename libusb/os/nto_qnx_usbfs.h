@@ -65,6 +65,8 @@ struct nto_qnx_device_handle_priv
 {
     struct usbd_pipe * control_pipe; /**< device control pipe */
     int fds[2];                  /* file descriptors returned from pipe() */
+    char msg_buf[sizeof(uint32_t) + sizeof(void*)];
+    int msg_buf_offset;
 };
 
 struct nto_qnx_transfer_priv

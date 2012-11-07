@@ -19,7 +19,8 @@
 
 #include "nto_qnx_usbfs.h"
 
-#define	INIT_SLEEP_SECS	1
+#define INIT_SLEEP_SECS 1
+#define MSG_SEND_SLEEP_USECS 15000
 
 /**
  * USB control transfers must complete within 5 seconds.
@@ -228,6 +229,65 @@ static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
     }
 }
 
+/* Sends a message down the per-device pipe to the event handling thread.
+ * These messages are received and processed in the event handling thread. */
+static int send_message(struct nto_qnx_device_handle_priv * hpriv,
+                        uint32_t message, void * dataPtr)
+{
+    char msg_buf[sizeof(message) + sizeof(dataPtr)];
+    int written = 0;
+    /* Form the message buffer */
+    memcpy(&msg_buf[0], &message, sizeof(message));
+    memcpy(&msg_buf[sizeof(message)], &dataPtr, sizeof(dataPtr));
+    /* Write out the message buffer */
+    while (written < sizeof(msg_buf)) {
+        int ret = write(hpriv->fds[1],
+                        &msg_buf[written],
+                        sizeof(msg_buf) - written);
+        if (ret > 0) {
+            written += ret;
+        } else if (ret == 0) {
+            /* didn't write any data, sleep for a bit */
+            usleep(MSG_SEND_SLEEP_USECS);
+        } else {
+            usbi_dbg("Failed to write message %d: %d", message, ret);
+            return ret;
+        }
+    }
+    return EOK;
+}
+
+/* Receives a message down the per-device event pipe.
+ * This should only be called from the message handling thread.
+ * Returns EOK if a message was received.
+ * Returns EWOULDBLOCK if no data left on the pipe. 
+ * Returns another error code on error. */
+static int recv_message(struct nto_qnx_device_handle_priv * hpriv,
+                        uint32_t *message, void ** dataPtr)
+{
+    int ret;
+    do {
+        /* Try to read in the message */
+      ret = read(hpriv->fds[0],
+                 &(hpriv->msg_buf[hpriv->msg_buf_offset]),
+                 sizeof(hpriv->msg_buf) - hpriv->msg_buf_offset);
+      if (ret > 0) {
+          hpriv->msg_buf_offset += ret;
+          if (hpriv->msg_buf_offset >= sizeof(hpriv->msg_buf)) {
+              /* Finished reading a message, so process it*/
+              memcpy(message,
+                     &(hpriv->msg_buf[0]),
+                     sizeof(*message));
+              memcpy(dataPtr,
+                     &(hpriv->msg_buf[sizeof(*message)]),
+                     sizeof(*dataPtr));
+              hpriv->msg_buf_offset = 0;
+              return EOK;
+          }
+      }
+    } while (ret > 0);
+    return EWOULDBLOCK;
+}
 
 /* Check a urb and itransfer to see if they are complete, if they are:
    send a message down the pipe() so that the application using this
@@ -251,15 +311,14 @@ static int handle_urb_status(struct urb_tailq * node)
         /* then we are done here, keep polling */
     } else {
 
-        /* struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer); */
-        struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
-        uint32_t message;
+        struct nto_qnx_device_handle_priv *hpriv =
+          __device_handle_priv(transfer->dev_handle);
 
         /* handle ustatus */
         int ustatus_masked = (ustatus & USBD_URB_STATUS_MASK);
-        
+
         usbi_dbg ("ustatus_masked: %d, %s", ustatus_masked, strerror(status));
-        
+
         switch (ustatus_masked)
         {
         case USBD_STATUS_INPROG:
@@ -271,11 +330,9 @@ static int handle_urb_status(struct urb_tailq * node)
             usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_CMP found!");
             usbi_info(ITRANSFER_CTX(itransfer), "transfer complete...");
             usbi_info (ITRANSFER_CTX (itransfer), "an async io operation has completed");
-            message = MESSAGE_ASYNC_IO_COMPLETE;
             break;
         case USBD_STATUS_CMP_ERR:
             usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_CMP_ERR found!");
-            message = MESSAGE_ASYNC_IO_COMPLETE;
             /* TODO: Handle other completion related errors */
             break;
         case USBD_STATUS_TIMEOUT:
@@ -288,13 +345,10 @@ static int handle_urb_status(struct urb_tailq * node)
             break;
         case USBD_STATUS_ABORTED:
             usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_ABORTED found!");
-            message = MESSAGE_ASYNC_IO_COMPLETE;
             /* TODO: handle aborted */
             break;
         }
-        
-        write (hpriv->fds[1], &message, sizeof (message));
-        write (hpriv->fds[1], &itransfer, sizeof (itransfer));
+        send_message(hpriv, MESSAGE_ASYNC_IO_COMPLETE, itransfer);
         TAILQ_REMOVE(&urb_head, node, chain);
         r = 1;
     handle_urb_status_skip:
@@ -478,7 +532,6 @@ static void device_removal_callback(struct usbd_connection * connection,
 {
     usbi_dbg ("device_removal_callback: starting");
 
-    uint32_t message = MESSAGE_DEVICE_GONE;
     libusb_context *ctx = NULL; /* NULL so that we can get the default context */
     struct libusb_device_handle *handle;
     struct libusb_device *device;
@@ -504,7 +557,7 @@ static void device_removal_callback(struct usbd_connection * connection,
             usbi_dbg("Sending notification to libusb via pipe that this "
                      "device has been disconnected from the io-usb stack");
             hpriv = __device_handle_priv(handle);
-            write (hpriv->fds[1], &message, sizeof (message));
+            send_message(hpriv, MESSAGE_DEVICE_GONE, NULL);
         }
     }
     pthread_mutex_unlock(&ctx->open_devs_lock);
@@ -1185,6 +1238,9 @@ static int op_open(struct libusb_device_handle *handle)
     /* we DO NOT want to block when reading from this pipe */
     fcntl(hpriv->fds[0], F_SETFL, O_NONBLOCK);
 
+    /* Reset the message reading buffer */
+    hpriv->msg_buf_offset = 0;
+
     usbi_dbg("Calling usbi_add_pollfd");
     usbi_add_pollfd(HANDLE_CTX(handle), hpriv->fds[0], POLLIN);
 
@@ -1402,9 +1458,7 @@ static int submit_control_transfer(struct usbi_transfer *itransfer)
     /* control transfers are synchronous in qnx, so we don't need to
        wait to write to the fds */
 
-    uint32_t message = MESSAGE_ASYNC_IO_COMPLETE;
-    write (hpriv->fds[1], &message, sizeof (message));
-    write (hpriv->fds[1], &itransfer, sizeof (itransfer));
+    send_message(hpriv, MESSAGE_ASYNC_IO_COMPLETE, itransfer);
 
     /* Async */
     /* calloc to ensure contained pointers are NULL */
@@ -1875,8 +1929,6 @@ static void qnx_async_io_callback(struct usbd_urb * urb, struct usbd_pipe * upip
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
 
-    uint32_t message;
-
     _uint32 ustatus;
     _uint32 usize;
     int ustatus_masked;
@@ -1902,9 +1954,7 @@ static void qnx_async_io_callback(struct usbd_urb * urb, struct usbd_pipe * upip
               strerror(status));
 
     /* send a completion message to the device's file descriptor */
-    message = MESSAGE_ASYNC_IO_COMPLETE;
-    write (hpriv->fds[1], &message, sizeof (message));
-    write (hpriv->fds[1], &itransfer, sizeof (itransfer));
+    send_message(hpriv, MESSAGE_ASYNC_IO_COMPLETE, itransfer);
 }
 
 /* Handle any pending events. This involves monitoring any active
@@ -1937,13 +1987,12 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds, nfds
 {
     usbi_dbg("op_handle_events: Starting os specific handle events");
     usbi_info(ctx, "num_ready = %d", num_ready);
-    struct usbi_transfer *itransfer;
 
-    int i, ret;
-    uint32_t message;
+    int i;
+    int ret = EOK;
 
     pthread_mutex_lock(&ctx->open_devs_lock);
-    
+
     for (i = 0; i < nfds && num_ready > 0; ++i)
     {
         struct pollfd *pollfd = &fds[i];
@@ -1953,8 +2002,8 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds, nfds
         usbi_info(ctx, "checking fds %i with revents = %x", fds[i], pollfd->revents);
 
         if (!pollfd->revents)
-        continue;
-        
+            continue;
+
         --num_ready;
         list_for_each_entry(handle, &ctx->open_devs, list, libusb_device_handle) 
         {
@@ -1969,66 +2018,39 @@ static int op_handle_events(struct libusb_context *ctx, struct pollfd *fds, nfds
             pthread_mutex_unlock(&ctx->open_devs_lock);
             return ENOENT;
         }
-        /* usbi_info(ctx, "complete_transfers is %d", hpriv->complete_transfers); */
-        /* we should reap io at least hpriv->complete_transfers times */
-        /* int complete_transfers = hpriv->complete_transfers; */
 
-        /* TODO: Should simply read until there remains nothing in the pipe */
-
-        /* int j; */
-        /* for (j = 0; j < complete_transfers; ++j) */
-        /* { */
-
-        int more_msgs = 1;   /* bool: are there messages to read in the pipe */
-        while (more_msgs)
-        {
-            /* --hpriv->complete_transfers; */
-        
-            /* If there are no errors, read from the pipe */
-            /* Once read, if there was nothing, continue */
-            /* Once read, if there was an error, check errno for EAGAIN or EWOULDBLOCK */
-            /*    if EAGAIN or EWOULDBLOCK then we are done here, return */
-            /*    otherwise, continue reading */
-
-            if (!(pollfd->revents & POLLERR)) {
-                usbi_info (ctx, "About to read...");
-                ret = read (hpriv->fds[0], &message, sizeof (message));
-                usbi_info (ctx, "Finished reading...");
-                if ( ret < 0 ){
-                    more_msgs = 0;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    {
-                        usbi_info (ctx, "Done reading!!");
-                    }
-                    break;
-                }
-                if (ret < sizeof (message)) continue;
-            } else message = MESSAGE_DEVICE_GONE;
-        
-            switch (message) 
-            {
-            case MESSAGE_DEVICE_GONE:
-                /* TODO: handle device gone */
-                usbi_dbg("op_handle_events: MESSAGE_DEVICE_GONE stub code");
-                usbi_remove_pollfd(HANDLE_CTX(handle), hpriv->fds[0]);
-                usbi_handle_disconnect(handle);
-                continue;
-            case MESSAGE_ASYNC_IO_COMPLETE:
-                read (hpriv->fds[0], &itransfer, sizeof(itransfer));
-                qnx_handle_callback (itransfer);
-                break;
-            default:
-                usbi_err (ctx, "unkown message received from device pipe");
+        do {
+            uint32_t message;
+            void * dataPtr;
+            ret = recv_message(hpriv, &message, &dataPtr);
+            if (ret == EOK) {
+              switch (message) 
+              {
+              case MESSAGE_DEVICE_GONE:
+                  /* TODO: handle device gone */
+                  usbi_dbg("op_handle_events: MESSAGE_DEVICE_GONE stub code");
+                  usbi_remove_pollfd(HANDLE_CTX(handle), hpriv->fds[0]);
+                  usbi_handle_disconnect(handle);
+                  continue;
+              case MESSAGE_ASYNC_IO_COMPLETE:
+                  qnx_handle_callback(dataPtr);
+                  break;
+              default:
+                  usbi_err (ctx, "unknown message received from device pipe");
+              }
             }
-            usbi_info(ctx, "going for another read...");
-            /* usbi_info(ctx, "complete_transfers reduced to %d", hpriv->complete_transfers); */
+        } while (ret == EOK);
+
+        if (ret == EWOULDBLOCK) {
+            /* This is expected, it just means that there are no more
+               messages to process. */
+            ret = EOK;
         }
-        
     }
 
     pthread_mutex_unlock(&ctx->open_devs_lock);
-    
-    return 0;
+
+    return ret;
 }
 
 
