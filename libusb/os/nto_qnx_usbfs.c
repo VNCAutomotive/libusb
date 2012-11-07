@@ -362,8 +362,8 @@ static void *urb_polling_thread_main(void *arg0)
     return NULL;
 }
 
-static int update_mappings(struct libusb_device_handle *handle) {
-    struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
+static int update_mappings(struct libusb_device *device) {
+    struct nto_qnx_device_priv *dpriv = __device_priv(device);
     struct libusb_config_descriptor * config;
     int i, j, k;
     int r;
@@ -375,7 +375,7 @@ static int update_mappings(struct libusb_device_handle *handle) {
     }
 
     /* Read and parse the config descriptor */
-    r = libusb_get_active_config_descriptor(handle->dev, &config);
+    r = libusb_get_active_config_descriptor(device, &config);
     if (r != LIBUSB_SUCCESS) {
         return r;
     }
@@ -588,19 +588,87 @@ static int op_init(struct libusb_context * ctx)
     return 0;
 }
 
+/* Helper function to read the current configuration on the device */
+static int get_current_configuration(struct libusb_device *dev)
+{
+    struct nto_qnx_device_priv * priv = __device_priv(dev);
+    int r = EOK;
+    struct usbd_urb *urb = NULL;
+    char* buffer = NULL;
+    struct usbd_pipe * control_pipe = NULL;
+    usbd_descriptors_t * ud = NULL;
+
+    buffer = usbd_alloc(1);
+    if (!buffer) {
+        usbi_dbg("Failed to allocate buffer for get configuration");
+        goto out;
+    }
+    urb = usbd_alloc_urb(NULL);
+    if (!urb) {
+        usbi_dbg("Failed to allocate urb for get configuration");
+        goto out;
+    }
+
+    /* Get the control pipe descriptor */
+    ud = (usbd_descriptors_t *) usbd_endpoint_descriptor(priv->usbd_device,
+                                                         1, 0, 0, 0,
+                                                         NULL);
+    if (!ud) {
+        usbi_dbg("Failed to get control pipe descriptor for get configuration");
+        goto out;
+    }
+
+    r = usbd_open_pipe(priv->usbd_device, ud, &control_pipe);
+    if (r != EOK) {
+        usbi_dbg("Failed to open control pipe for get configuration: %d",
+                 r);
+        goto out;
+    }
+
+    r = usbd_setup_vendor(urb,
+                          URB_DIR_IN | URB_SHORT_XFER_OK,
+                          LIBUSB_REQUEST_GET_CONFIGURATION,
+                          USB_RECIPIENT_DEVICE,
+                          0, 0,
+                          buffer, 1);
+    if (r != EOK) {
+        usbi_dbg("Failed to setup vendor transfer for get configuration: %d",
+                 r);
+        goto out;
+    }
+
+    r = usbd_io(urb, control_pipe, NULL, 0, CONTROL_TRANSFER_TIMEOUT_MS);
+    if (r != EOK) {
+        usbi_dbg("Failed to perform get configuration transfer: %d", r);
+        goto out;
+    }
+
+    priv->selected_configuration = *buffer;
+
+out:
+    if (urb)
+      usbd_free_urb(urb);
+    if (buffer)
+      usbd_free(buffer);
+    if (control_pipe)
+      usbd_close_pipe(control_pipe);
+
+    return qnx_err_to_libusb(r);
+}
+
 /* Helper function to read the configuration specified by `config' on
    the device `dev' into the buffer `*buffer'. Performs allocation
    using malloc on the buffer pointer `buffer' */
 static int read_configuration(unsigned char **buffer, struct libusb_device *dev, int config)
 {
-    usbi_dbg("reading configuration %d", config);
     int r;
     unsigned char tmp[8];
 
     struct libusb_config_descriptor config_descriptor;
     struct nto_qnx_device_priv *dpriv = __device_priv(dev);
     struct usbd_device *usbd_d = dpriv->usbd_device;
-    
+
+    usbi_dbg("reading configuration %d", config);
     usbi_dbg("trying to read the first few bytes of the configuration descriptor");
     r = usbd_descriptor(usbd_d, 0, USB_DESC_CONFIGURATION,
                         USB_RECIPIENT_DEVICE, config, 0,
@@ -608,10 +676,10 @@ static int read_configuration(unsigned char **buffer, struct libusb_device *dev,
     if (r == EMSGSIZE)
     {
       /* Expected as only attemping a short read */
-      r = 0;
+      r = LIBUSB_SUCCESS;
     }
 
-    if (r != 0)
+    if (r != EOK)
     {
       usbi_dbg("Failed to read start of configuration descriptor, %d", r);
       return LIBUSB_ERROR_IO;
@@ -632,14 +700,14 @@ static int read_configuration(unsigned char **buffer, struct libusb_device *dev,
                         USB_RECIPIENT_DEVICE, config, 0,
                         *buffer, config_descriptor.wTotalLength);
 
-    if (r != 0)
+    if (r != EOK)
     {
       usbi_dbg("Failed to read full configuration descriptor, %d", r);
       return LIBUSB_ERROR_IO;
     }
 
     usbi_dbg("finished reading configuration %d", config);
-    return r;
+    return qnx_err_to_libusb(r);
 }
 
 /* Initialize the data of the device `dev'. This includes the
@@ -668,28 +736,38 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum, uint8_t 
        function*/
     priv->usbd_device = usbd_d;
 
+    /* Cache the device descriptor as required by libusb */
+    priv->dev_descriptor = device_buffer;
     status = usbd_descriptor(usbd_d, 0 /* GET */, USB_DESC_DEVICE,
                              USB_RECIPIENT_DEVICE, 0, 0,
                              device_buffer, DEVICE_DESC_LENGTH);
 
-    /* Cache the device descriptor as required by libusb */
-    priv->dev_descriptor = device_buffer;
+    if (status != EOK) {
+        usbi_dbg("Failed to retrieve device descriptor");
+        return qnx_err_to_libusb(status);
+    }
 
     /* TODO: This should work, number of configurations is the last
        byte in the device descriptor, could be cleaner. */
     dev->num_configurations = device_buffer[DEVICE_DESC_LENGTH - 1];
 
-    /* TODO: handle error conditions as well as alternate configurations */
+    /* Read the current configuration as this isn't cached */
+    r = get_current_configuration(dev);
 
-    /* We are going to guess that current configuration used is the
-     * first (configuration index 0).
-     * TODO: work out a way to find this value. */
-    priv->selected_configuration = 0;
+    if (r != LIBUSB_SUCCESS) {
+        usbi_dbg("Failed to retrieve current configuration");
+        return r;
+    }
+
+    /* Read and cache the descriptor for this configuration */
     r = read_configuration(&priv->config_descriptor, dev, 0);
 
-    if (r == LIBUSB_SUCCESS) {
-        r = update_mappings(handle);
+    if (r != LIBUSB_SUCCESS) {
+        usbi_dbg("Failed to read current configuration descriptor");
+        return r;
     }
+
+    r = update_mappings(dev);
 
     priv->connection = global_ro_connection;
     TAILQ_INIT(&priv->claimed_interfaces);
@@ -754,9 +832,9 @@ static int enumerate_device(struct libusb_context *ctx, struct discovered_devs *
         *_discdevs = discdevs;
 
  out:
-	if (need_unref)
+    if (need_unref)
         libusb_unref_device(dev);
-	return r;
+    return r;
 }
 
 /* Enumerate all the USB devices on the system, returning them in a list
@@ -2090,16 +2168,8 @@ static int op_get_configuration(struct libusb_device_handle *handle, int *config
 {
     struct nto_qnx_device_priv *dpriv = __device_priv(handle->dev);
 
-    /* Not available in cache necessarily  */
-    if (dpriv->selected_configuration == -1)
-    {
-        return LIBUSB_ERROR_NOT_SUPPORTED;
-    }
-    else
-    {
-        *config = dpriv->selected_configuration;
-        return 0;
-    }
+    *config = dpriv->selected_configuration;
+    return LIBUSB_SUCCESS;
 }
 
 /* Set the active configuration for a device.
@@ -2142,7 +2212,7 @@ static int op_set_configuration(struct libusb_device_handle *handle, int config)
     r = read_configuration(&dpriv->config_descriptor, handle->dev, config);
 
     if (r == EOK) {
-        int status = update_mappings(handle);
+        int status = update_mappings(handle->dev);
         if (status != LIBUSB_SUCCESS) {
             return status;
         }
