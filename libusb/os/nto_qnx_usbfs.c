@@ -19,7 +19,6 @@
 
 #include "nto_qnx_usbfs.h"
 
-#define INIT_SLEEP_SECS 1
 #define MSG_SEND_SLEEP_USECS 15000
 
 /**
@@ -65,22 +64,6 @@
                  transfer->buffer                                       \
                  );                                                     \
     } while(0)
-
-
-
-/* urb_q structure, used for the internal polling thread which checks
-   on the status of urbs */
-struct urb_tailq {
-    TAILQ_ENTRY(urb_tailq) chain;
-    /* struct usbd_urb * urb; */
-    struct usbi_transfer * itransfer;
-};
-
-/* Global list of urb's which need to be polled by the internal thread
-
-   This is the head of the urb_tailq */
-TAILQ_HEAD(urb_head_type, urb_tailq) 
-urb_head;
 
 /* Channel id's for thread communication */
 static int urb_thread_chid;
@@ -287,136 +270,6 @@ static int recv_message(struct nto_qnx_device_handle_priv * hpriv,
       }
     } while (ret > 0);
     return EWOULDBLOCK;
-}
-
-/* Check a urb and itransfer to see if they are complete, if they are:
-   send a message down the pipe() so that the application using this
-   library knows to call handle_events. */
-static int handle_urb_status(struct urb_tailq * node)
-{
-
-    int r = 0;
-    _uint32 ustatus;
-    _uint32 usize;
-    int status;
-
-    struct usbi_transfer *itransfer = node->itransfer;
-    struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
-    struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
-
-    status = usbd_urb_status(tpriv->urb, &ustatus, &usize);
-
-    if (status == EBUSY)
-    {
-        /* then we are done here, keep polling */
-    } else {
-
-        struct nto_qnx_device_handle_priv *hpriv =
-          __device_handle_priv(transfer->dev_handle);
-
-        /* handle ustatus */
-        int ustatus_masked = (ustatus & USBD_URB_STATUS_MASK);
-
-        usbi_dbg ("ustatus_masked: %d, %s", ustatus_masked, strerror(status));
-
-        switch (ustatus_masked)
-        {
-        case USBD_STATUS_INPROG:
-            usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_INPROG found!");
-            /* then we are done here, keep polling */
-            goto handle_urb_status_skip;
-            break;
-        case USBD_STATUS_CMP:
-            usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_CMP found!");
-            usbi_info(ITRANSFER_CTX(itransfer), "transfer complete...");
-            usbi_info (ITRANSFER_CTX (itransfer), "an async io operation has completed");
-            break;
-        case USBD_STATUS_CMP_ERR:
-            usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_CMP_ERR found!");
-            /* TODO: Handle other completion related errors */
-            break;
-        case USBD_STATUS_TIMEOUT:
-            usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_TIMEOUT found!");
-            /* TODO: handle timeout */
-            /* Here we should cancel */
-            TAILQ_REMOVE(&urb_head, node, chain);
-            r = 1;
-            goto handle_urb_status_skip;
-            break;
-        case USBD_STATUS_ABORTED:
-            usbi_info(ITRANSFER_CTX(itransfer), "USBD_STATUS_ABORTED found!");
-            /* TODO: handle aborted */
-            break;
-        }
-        send_message(hpriv, MESSAGE_ASYNC_IO_COMPLETE, itransfer);
-        TAILQ_REMOVE(&urb_head, node, chain);
-        r = 1;
-    handle_urb_status_skip:
-        return r;
-    }
-    return r;
-}
-
-/* Simple thread that polls a given linked list of urbs to check if
-   any of them need to have their status reported through the fds.
-
-   It's very possible that this internal thread based approach is not
-   necessary. There seems to be nothing that isn't either synchronous
-   or which calls their callback function.
-
-*/
-static void *urb_polling_thread_main(void *arg0)
-{
-    thread_wakeup_t msg;
-    int rcvid;
-
-    while(1)
-    {
-        struct urb_tailq * node;
-        struct urb_tailq * delete_node = NULL;
-
-        if (TAILQ_EMPTY(&urb_head))
-        {
-            while (1)
-            {
-                usbi_dbg("thread sleeping...");
-                rcvid = MsgReceive(urb_thread_chid, &msg, sizeof(msg), NULL);
-                if (rcvid == 0)
-                {
-                    /* message received was a pulse, wakeup thread */
-                    usbi_dbg ("pulse code received: %d, thread woken", (int)msg.pulse.code);
-                    break;
-                } 
-            }
-            
-        } else {
-            if (!TAILQ_EMPTY(&urb_head))
-            {
-                TAILQ_FOREACH(node, &urb_head, chain)
-                {
-                    int status;
-
-                    /* Delete node only if handle_urb_status returns
-                       true (1) this prevents a segfault from
-                       accessing freed memory. Performing it in this
-                       specific order also avoids a race condition. */
-                    if (delete_node) free(delete_node);
-
-                    status = handle_urb_status(node);
-
-                    if (status) delete_node = node;
-                    
-                }
-            }
-        }
-
-        struct timespec stime;
-        stime.tv_sec = 0;
-        stime.tv_nsec = 100000;
-
-        nanosleep(&stime, NULL);           /* sleep 100 milliseconds */
-    }
-    return NULL;
 }
 
 static int update_mappings(struct libusb_device *device) {
@@ -628,18 +481,11 @@ static int op_init(struct libusb_context * ctx)
     }
 
 
-    /* Initialize urb list */
-    TAILQ_INIT(&urb_head);
-
     urb_thread_chid = ChannelCreate(0);
     urb_main_coid = ConnectAttach(0,0,
                                   urb_thread_chid,
                                   _NTO_SIDE_CHANNEL,
                                   0);
-
-    pthread_create(NULL, NULL, urb_polling_thread_main, NULL);
-
-    sleep(INIT_SLEEP_SECS);
 
     return 0;
 }
@@ -1460,19 +1306,6 @@ static int submit_control_transfer(struct usbi_transfer *itransfer)
 
     send_message(hpriv, MESSAGE_ASYNC_IO_COMPLETE, itransfer);
 
-    /* Async */
-    /* calloc to ensure contained pointers are NULL */
-    /* struct urb_tailq * new_node = (struct urb_tailq *)calloc(1, sizeof(struct urb_tailq)); */
-    /* new_node->itransfer = itransfer; */
-    
-    /* TAILQ_INSERT_TAIL(&urb_head, new_node, chain); */
-
-    /* /\* Send pulse to wakeup polling thread *\/ */
-    /* MsgSendPulse(urb_main_coid, */
-    /*              -1,            /\* same priority as calling thread*\/ */
-    /*              0,             /\* doesn't matter what pulse code *\/ */
-    /*              0);            /\* doesn't matter what payload *\/ */
-
     return 0;
 }
 
@@ -1618,17 +1451,6 @@ static int submit_bulk_transfer(struct usbi_transfer *itransfer, unsigned char u
     }
 
     usbi_info(TRANSFER_CTX(transfer), "submit_bulk_transfer: bulk transfer submitted!");
-
-    /* struct urb_tailq * new_node = (struct urb_tailq *)calloc(1, sizeof(struct urb_tailq)); */
-    /* new_node->itransfer = itransfer; */
-
-    /* TAILQ_INSERT_TAIL(&urb_head, new_node, chain); */
-
-    /* /\* Send pulse to wakeup polling thread if it's sleeping *\/ */
-    /* MsgSendPulse(urb_main_coid,  */
-    /*              -1,            /\* same priority as calling thread*\/  */
-    /*              0,             /\* doesn't matter what pulse code *\/ */
-    /*              0);            /\* doesn't matter what payload *\/ */
 
     return 0;
 }
