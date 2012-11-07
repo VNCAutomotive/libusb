@@ -189,7 +189,10 @@ static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
     case USBD_STATUS_CMP:
         return LIBUSB_TRANSFER_COMPLETED;
     case USBD_STATUS_ABORTED:
-        return LIBUSB_TRANSFER_CANCELLED;
+        if (itransfer->flags & USBI_TRANSFER_TIMED_OUT)
+            return LIBUSB_TRANSFER_TIMED_OUT;
+        else
+            return LIBUSB_TRANSFER_CANCELLED;
     case USBD_STATUS_TIMEOUT:
         return LIBUSB_TRANSFER_TIMED_OUT;
     default:
@@ -1762,6 +1765,7 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     _uint32 usize;
 
     int status;
+    int api_status;
 
     int dir;
     if(transfer->type == LIBUSB_TRANSFER_TYPE_CONTROL) {
@@ -1831,8 +1835,8 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     } 
     else
     {
-        usbi_info(ITRANSFER_CTX(itransfer), "status FAILURE... ustatus = %x, usize = %d errstatus: %s",
-                  ustatus, usize, strerror(status));
+        usbi_info(ITRANSFER_CTX(itransfer), "status FAILURE... ustatus = %x, usize = %d errstatus: %s status: %d",
+                  ustatus, usize, strerror(status), status);
         /* TODO: Error, usbd_urb_status failed */
     }
 
@@ -1851,11 +1855,13 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
         usbd_close_pipe(tpriv->transfer_pipe);
     }
 
-    /* TODO: handle canceled transfers */
-
     usbi_info(ITRANSFER_CTX(itransfer), "Transfer completed");
-    usbi_handle_transfer_completion(itransfer, qnx_transfer_status(itransfer, ustatus));
-    /* usbi_handle_transfer_completion(itransfer, LIBUSB_TRANSFER_COMPLETED); */
+    api_status = qnx_transfer_status(itransfer, ustatus);
+    if (api_status == LIBUSB_TRANSFER_CANCELLED) {
+        usbi_handle_transfer_cancellation(itransfer);
+    } else {
+        usbi_handle_transfer_completion(itransfer, api_status);
+    }
 }
 
 /* This should only be used as a callback for bulk submissions at this
