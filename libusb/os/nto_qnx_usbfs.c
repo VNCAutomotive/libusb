@@ -571,7 +571,6 @@ static int read_configuration(unsigned char **buffer, struct libusb_device *dev,
     struct usbd_device *usbd_d = dpriv->usbd_device;
 
     usbi_dbg("reading configuration %d", config);
-    usbi_dbg("trying to read the first few bytes of the configuration descriptor");
     r = usbd_descriptor(usbd_d, 0, USB_DESC_CONFIGURATION,
                         USB_RECIPIENT_DEVICE, config, 0,
                         tmp, sizeof tmp);
@@ -587,10 +586,8 @@ static int read_configuration(unsigned char **buffer, struct libusb_device *dev,
       return LIBUSB_ERROR_IO;
     }
 
-    usbi_dbg("parsing the descriptor");
     usbi_parse_descriptor(tmp, "bbw", &config_descriptor, 0);
 
-    usbi_dbg("mallocing the required memory in order to store the full descriptor");
     *buffer = (unsigned char *) malloc(config_descriptor.wTotalLength);
     if (!(*buffer))
     {
@@ -1043,18 +1040,13 @@ static int op_release_interface(struct libusb_device_handle *handle, int iface);
  */
 static void op_close(struct libusb_device_handle *handle)
 {
-    usbi_dbg("starting op_close");
     struct libusb_device *dev = handle->dev;
     struct nto_qnx_device_handle_priv * hpriv = __device_handle_priv(handle);
     struct nto_qnx_device_priv * dpriv = __device_priv(dev);
-    usbd_device_instance_t instance;
-
-    int devno, busno, ifno;
-    busno = dev->bus_number;
-    devno = dev->device_address;
-    ifno = 0;
 
     int status;
+
+    usbi_dbg("Starting op_close");
 
     if(hpriv == NULL)
       return;
@@ -1069,7 +1061,6 @@ static void op_close(struct libusb_device_handle *handle)
     }
 
     /* cleanup pipe */
-    usbi_dbg("closing pipe");
     if (hpriv->control_pipe != NULL) {
         usbd_reset_pipe(hpriv->control_pipe);
         status = usbd_close_pipe(hpriv->control_pipe);
@@ -1084,7 +1075,6 @@ static void op_close(struct libusb_device_handle *handle)
     /* remove fds */
     if (hpriv->fds[0] != -1)
     {
-        usbi_dbg("removing file descriptors from list");
         usbi_remove_pollfd(HANDLE_CTX(handle), hpriv->fds[0]);
         close (hpriv->fds[1]);
         close (hpriv->fds[0]);
@@ -2168,7 +2158,8 @@ static int op_reset_device(struct libusb_device_handle *handle)
     
     r = usbd_reset_device(dpriv->usbd_device);
     if (r != EOK) {
-        usbi_err(HANDLE_CTX(handle), "failed to reset device, %s", strerror(r));
+        usbi_err(HANDLE_CTX(handle), "failed to reset device: %d (%s)",
+                 r, strerror(r));
         return qnx_err_to_libusb(r);
     }
 
@@ -2243,17 +2234,17 @@ static void op_destroy_device(struct libusb_device *dev)
 {
     struct nto_qnx_device_priv *dpriv = __device_priv(dev);
     int status;
-    
+
     if (dpriv->dev_descriptor)
     {
-        usbi_dbg("trying to free dev_descriptor...");
         free(dpriv->dev_descriptor);
+        dpriv->dev_descriptor = NULL;
     }
 
     if (dpriv->config_descriptor)
     {
-        usbi_dbg("trying to free config_descriptor...");
         free(dpriv->config_descriptor);
+        dpriv->config_descriptor = NULL;
     }
 
     if (dpriv->usbd_device)
@@ -2264,8 +2255,7 @@ static void op_destroy_device(struct libusb_device *dev)
             usbi_err(DEVICE_CTX(dev), "usbd_detach() failed");
         }
     }
-
-    usbi_info(DEVICE_CTX(dev), "All done!");
+    usbi_dbg("Destroyed device %p", dev);
 }
 
 /* Clear a transfer as if it has completed or cancelled, but do not
@@ -2354,12 +2344,6 @@ const struct usbi_os_backend nto_qnx_usbfs_backend = {
 	.handle_events = op_handle_events, 
 
 	.clock_gettime = op_clock_gettime, 
-
-    /* Not sure if we can do this, depends on whether or not
-       CLOCK_MONOTONIC is an fd or not */
-    /* #ifdef USBI_TIMERFD_AVAILABLE */
-    /* 	.get_timerfd_clockid = NULL,  */
-    /* #endif */
 
 	.device_priv_size = sizeof(struct nto_qnx_device_priv),
 	.device_handle_priv_size = sizeof(struct nto_qnx_device_handle_priv),
