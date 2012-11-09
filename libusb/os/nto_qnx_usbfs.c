@@ -621,15 +621,26 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum, uint8_t 
     /* === internal === */
     int r = 0;
     int status;
-    unsigned char * device_buffer = malloc(DEVICE_DESC_LENGTH);
+    unsigned char * device_buffer = NULL;
+
+    /* Initialize all the private members */
+    priv->dev_descriptor = NULL;
+    priv->config_descriptor = NULL;
+    priv->usbd_device = NULL;
+    priv->selected_configuration = 0;
+    memset(&(priv->in_ep_to_iface), 0, sizeof(priv->in_ep_to_iface));
+    memset(&(priv->out_ep_to_iface), 0, sizeof(priv->out_ep_to_iface));
+    TAILQ_INIT(&priv->claimed_interfaces);
+
+    dev->bus_number = busnum;
+    dev->device_address = devaddr;
+
+    device_buffer = malloc(DEVICE_DESC_LENGTH);
     if (!device_buffer)
     {
       usbi_dbg("Failed to allocate memory for device buffer");
       return LIBUSB_ERROR_NO_MEM;
     }
-
-    dev->bus_number = busnum;
-    dev->device_address = devaddr;
 
     /* storing the usbd device as required by the read_configuration
        function*/
@@ -667,8 +678,6 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum, uint8_t 
     }
 
     r = update_mappings(dev);
-
-    TAILQ_INIT(&priv->claimed_interfaces);
 
     return r;
 }
@@ -1951,7 +1960,10 @@ static int op_set_configuration(struct libusb_device_handle *handle, int config)
     }
 
     dpriv->selected_configuration = config;
-    free(dpriv->config_descriptor);
+    if (dpriv->config_descriptor) {
+        free(dpriv->config_descriptor);
+        dpriv->config_descriptor = NULL;
+    }
 
     r = read_configuration(&dpriv->config_descriptor, handle->dev, config);
 
@@ -2154,19 +2166,54 @@ static int op_cancel_transfer(struct usbi_transfer *itransfer)
 static int op_reset_device(struct libusb_device_handle *handle)
 {
     struct nto_qnx_device_priv * dpriv = __device_priv(handle->dev);
-    int r;
-    
-    r = usbd_reset_device(dpriv->usbd_device);
+    int r = EOK;
+    struct usbd_device * device = NULL;
+    int close_device = 0;
+    struct claimed_interfaces_list * node;
+
+    /* Attempt to use one of the devices from a claimed interface if
+     * it's available. */
+    TAILQ_FOREACH(node, &dpriv->claimed_interfaces, chain) {
+        if(node->usbd_device != NULL) {
+            usbi_dbg("Using device from interface %d for reset call", 
+                     node->claimed_interface);
+            device = node->usbd_device;
+            break;
+        }
+    }
+
+
+    if (!device) {
+        /* Can't just used dpriv->usbd_device to reset the device as it is a
+         * read-only handle. */
+        usbd_device_instance_t instance;
+        usbi_dbg("Opening device for reset call");
+        memset(&instance, USBD_CONNECT_WILDCARD,
+               sizeof(usbd_device_instance_t));
+        instance.path = handle->dev->bus_number;
+        instance.devno = handle->dev->device_address;
+        r = usbd_attach(global_connection, &instance, 0, &device);
+        close_device = 1;
+    }
+    if (r != EOK) {
+        usbi_err(HANDLE_CTX(handle),
+                 "Failed to attach to device to reset: %d (%s)",
+                 r, strerror(r));
+    }
+
+    r = usbd_reset_device(device);
     if (r != EOK) {
         usbi_err(HANDLE_CTX(handle), "failed to reset device: %d (%s)",
                  r, strerror(r));
+        if (close_device && device)
+          usbd_detach(device);
         return qnx_err_to_libusb(r);
     }
 
-    /* TODO: is there actually any cleanup necessary here? */
-
-    /* for now we will return LIBUSB_ERROR_NOT_FOUND so that the
-       application knows to reconnect to the device */
+    /* Return LIBUSB_ERROR_NOT_FOUND so that the application knows to
+     * reconnect to the device. */
+    if (close_device && device)
+        usbd_detach(device);
     return LIBUSB_ERROR_NOT_FOUND;
 }
 
