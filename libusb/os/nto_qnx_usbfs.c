@@ -26,6 +26,11 @@
  */
 #define CONTROL_TRANSFER_TIMEOUT_MS 5000
 
+/** Invalid Channel ID for QNX systems */
+#define NTO_QNX_INVALID_CHID -1
+/** Invalid Connection ID for QNX systems */
+#define NTO_QNX_INVALID_COID -1
+
 /* Maximum number of buses possible (read-only connection is not
    compatible with dynamically connecting to devices, so you have to
    iterate through ALL possible busno/devno combinations */
@@ -66,8 +71,8 @@
     } while(0)
 
 /* Channel id's for thread communication */
-static int urb_thread_chid;
-static int urb_main_coid;
+static int urb_thread_chid = NTO_QNX_INVALID_CHID;
+static int urb_main_coid = NTO_QNX_INVALID_COID;
 
 /* The message type for communicating with the thread, it only accepts
    pulses at the moment */
@@ -86,19 +91,17 @@ static void qnx_async_io_callback(struct usbd_urb * urb, struct usbd_pipe * upip
  */
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* TODO: This variable indicates the level of debugging. It's set by
-   ctx->debug in the init, should probably be removed or replaced with
-   something more consistent with libusb. */
-static int usb_debug = 2;
-
 /* Keeping these two global connections is gross, it does not appear
    that there is a better way at this time. */
 
 /* Normal READ WRITE connection */
-struct usbd_connection * global_connection;
+struct usbd_connection * global_connection = NULL;
 
 /* READ ONLY connection */
-struct usbd_connection * global_ro_connection;
+struct usbd_connection * global_ro_connection = NULL;
+
+/* Counter for open contexts */
+static int context_count = 0;
 
 
 /* Return an nto_qnx_device_priv structure from the libusb device structure */
@@ -447,13 +450,18 @@ static int op_init(struct libusb_context * ctx)
     /* Adding null for callbacks allows creation of a connection in read-only mode: */
     usbd_connect_parm_t ro_parm = { 0, USB_VERSION, USBD_VERSION, 0, 0, 0, 0, &interest, NULL, 0 }; 
 
-    int status;
-    
-    usb_debug = 0; /* 3; ctx->debug; */
+    int status = EOK;
 
-    if (pthread_mutex_trylock(&init_mutex) != 0) {
-        usbi_warn(ctx, "already initialised");
+    if (pthread_mutex_lock(&init_mutex) != 0) {
+        usbi_warn(ctx, "failed to lock init mutex");
         return LIBUSB_ERROR_BUSY;
+    }
+
+    if (context_count > 0) {
+        /* Context has already been created, just increase the
+         * reference count */
+        ++context_count;
+        goto out_init;
     }
 
     /* Connect with a read only connection, this allows interacting in
@@ -462,32 +470,78 @@ static int op_init(struct libusb_context * ctx)
        but I cannot figure out a better way to implement it without
        making changes to libusbdi */
     if ((status = usbd_connect(&ro_parm, &global_ro_connection)) != EOK) {
-        usbi_err(ctx, "usdb_connect() for read only failed");
-        pthread_mutex_unlock(&init_mutex);
-        return qnx_err_to_libusb(status);
+        usbi_err(ctx, "usdb_connect() for read only failed: %d", status);
+        goto out_init;
     }
 
     /* Connect with a read/write connection, this lets us interact
        with usb devices in read/write mode */
     if ((status = usbd_connect(&parm, &global_connection)) != EOK) {
-        usbi_err(ctx, "usdb_connect() failed");
-        pthread_mutex_unlock(&init_mutex);
-        return qnx_err_to_libusb(status);
+        usbi_err(ctx, "usdb_connect() failed: %d", status);
+        goto out_init;
     }
 
-    /* sleep a while to let the USB stack send us insertion notifications */
-    if (usb_debug >= 2) {
-        usbi_info(ctx, "sleeping currently");
+    /* Create the thread which urb callbacks come in on */
+    urb_thread_chid = ChannelCreate_r(0);
+    if (urb_thread_chid < 0) {
+        status = -urb_thread_chid;
+        usbi_err(ctx, "ChannelCreate_r failed: %d", status);
+        goto out_init;
     }
 
+    urb_main_coid = ConnectAttach_r(0,0,
+                                    urb_thread_chid,
+                                    _NTO_SIDE_CHANNEL,
+                                    0);
+    if (urb_main_coid < 0) {
+        status = -urb_main_coid;
+        usbi_err(ctx, "ConnectAttach_r failed: %d", status);
+        goto out_init;
+    }
 
-    urb_thread_chid = ChannelCreate(0);
-    urb_main_coid = ConnectAttach(0,0,
-                                  urb_thread_chid,
-                                  _NTO_SIDE_CHANNEL,
-                                  0);
+    ++context_count;
 
-    return 0;
+out_init:
+    if (status != EOK) {
+        /* Clean up any global values which were initialised. */
+          if (global_connection &&
+              (status = usbd_disconnect(global_connection)) != EOK) {
+              usbi_err(ctx, "Failed to disconnect from the global "
+                       "read/write connection while aborting init: %d",
+                       status);
+          }
+          global_connection = NULL;
+
+          if (global_ro_connection &&
+              (status = usbd_disconnect(global_ro_connection)) != EOK) {
+              usbi_err(ctx, "Failed to disconnect from the global "
+                       "read-only connection while aborting init: %d",
+                       status);
+          }
+          global_ro_connection = NULL;
+
+          if (urb_main_coid != NTO_QNX_INVALID_COID &&
+              (status = ConnectDetach_r(urb_main_coid)) != EOK) {
+              usbi_err(ctx, "Failed to disconnect from the global coid "
+                       "while aborting init: %d",
+                       status);
+          }
+          urb_main_coid = NTO_QNX_INVALID_COID;
+
+          if (urb_thread_chid != NTO_QNX_INVALID_CHID &&
+              (status = ChannelDestroy_r(urb_thread_chid)) != EOK) {
+              usbi_err(ctx, "Failed to destroy global channel "
+                       "while aborting init: %d",
+                       status);
+          }
+          urb_thread_chid = NTO_QNX_INVALID_CHID;
+    }
+
+    if (pthread_mutex_unlock(&init_mutex) != EOK) {
+        usbi_warn(ctx, "failed to unlock init mutex");
+    }
+
+    return qnx_err_to_libusb(status);
 }
 
 /* Helper function to read the current configuration on the device */
@@ -822,10 +876,7 @@ static int op_get_device_list(struct libusb_context *ctx,
             /* if (status != EOK) { */
             if (status == EOK)
             {
-                if (usb_debug >= 2) {
-                    usbi_dbg("found a device, bus number: %d, device address: %d", busno, devno);
-                }
-                
+                usbi_dbg("found a device, bus number: %d, device address: %d", busno, devno);
                 r = enumerate_device(ctx, &discdevs, busno, devno, usbd_d);
             }
             if (status == EBUSY)
@@ -2338,24 +2389,57 @@ static void op_clear_transfer_priv(struct usbi_transfer *itransfer)
  */
 static void op_exit(void)
 {
-    int status;
-    libusb_context *ctx = NULL; /* NULL so that we can get the default context */
+    int status = EOK;
+    libusb_context *ctx = NULL;
 
-    /* Get the default context */
+    /* Get the default context so that logging is possible */
     USBI_GET_CONTEXT(ctx);
-    usbi_info(ctx, "About to disconnect both global connections");
 
-    if ((status = usbd_disconnect(global_connection)) != EOK)
-    {
-        usbi_err(ctx, "Failed to disconnect from the global read/write connection");
+    if (pthread_mutex_lock(&init_mutex) != EOK) {
+        usbi_warn(ctx, "failed to lock init mutex in exit");
+        return;
     }
 
-    if ((status = usbd_disconnect(global_ro_connection)) != EOK)
-    {
-        usbi_err(ctx, "Failed to disconnect from the global read-only connection");
+    --context_count;
+    if (context_count > 0) {
+        usbi_dbg("context_count: %d so not disconnecting", context_count);
+        goto out_exit;
     }
+    usbi_dbg("context_count: %d so disconnecting", context_count);
+    context_count = 0;
 
-    pthread_mutex_unlock(&init_mutex);
+    if (global_connection &&
+        (status = usbd_disconnect(global_connection)) != EOK) {
+        usbi_err(ctx, "Failed to disconnect from the global "
+                 "read/write connection: %d", status);
+    }
+    global_connection = NULL;
+
+    if (global_ro_connection &&
+        (status = usbd_disconnect(global_ro_connection)) != EOK) {
+        usbi_err(ctx, "Failed to disconnect from the global "
+                 "read-only connection: %d", status);
+    }
+    global_ro_connection = NULL;
+
+    if (urb_main_coid != NTO_QNX_INVALID_COID &&
+        (status = ConnectDetach_r(urb_main_coid)) != EOK) {
+        usbi_err(ctx, "Failed to disconnect from the global coid: %d",
+                 status);
+    }
+    urb_main_coid = NTO_QNX_INVALID_COID;
+
+    if (urb_thread_chid != NTO_QNX_INVALID_CHID &&
+        (status = ChannelDestroy_r(urb_thread_chid)) != EOK) {
+        usbi_err(ctx, "Failed to destroy global channel: %d",
+                 status);
+    }
+    urb_thread_chid = NTO_QNX_INVALID_CHID;
+
+out_exit:
+    if (pthread_mutex_unlock(&init_mutex) != EOK) {
+        usbi_warn(ctx, "failed to unlock init mutex in exit");
+    }
 }
 
 const struct usbi_os_backend nto_qnx_usbfs_backend = {
