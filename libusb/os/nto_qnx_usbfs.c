@@ -619,28 +619,50 @@ static int read_configuration(unsigned char **buffer, struct libusb_device *dev,
 {
     int r;
     unsigned char tmp[8];
+    int conf_index = -1;
 
     struct libusb_config_descriptor config_descriptor;
     struct nto_qnx_device_priv *dpriv = __device_priv(dev);
     struct usbd_device *usbd_d = dpriv->usbd_device;
+    struct libusb_device_descriptor device_desc;
 
     usbi_dbg("reading configuration %d", config);
-    r = usbd_descriptor(usbd_d, 0, USB_DESC_CONFIGURATION,
-                        USB_RECIPIENT_DEVICE, config, 0,
-                        tmp, sizeof tmp);
-    if (r == EMSGSIZE)
-    {
-      /* Expected as only attemping a short read */
-      r = LIBUSB_SUCCESS;
+
+    r = libusb_get_device_descriptor(dev, &device_desc);
+    if (r != LIBUSB_SUCCESS) {
+        usbi_dbg("Failed to retrieve device descriptor: %d", r);
+        return r;
     }
 
-    if (r != EOK)
-    {
-      usbi_dbg("Failed to read start of configuration descriptor, %d", r);
-      return LIBUSB_ERROR_IO;
-    }
+    /* Search the configuration descriptors for this index */
+    do {
+        ++conf_index;
+        memset(&tmp, 0, sizeof(tmp));
 
-    usbi_parse_descriptor(tmp, "bbw", &config_descriptor, 0);
+        r = usbd_descriptor(usbd_d, 0, USB_DESC_CONFIGURATION,
+                            USB_RECIPIENT_DEVICE, conf_index, 0,
+                            tmp, sizeof(tmp));
+        if (r == EMSGSIZE)
+          {
+            /* Expected as only attemping a short read */
+            r = LIBUSB_SUCCESS;
+          }
+
+        if (r != EOK)
+            {
+            usbi_dbg("Failed to read start of configuration descriptor, %d", r);
+            return LIBUSB_ERROR_IO;
+            }
+
+        usbi_parse_descriptor(tmp, "bbwbb", &config_descriptor, 0);
+
+    } while (config_descriptor.bConfigurationValue != config &&
+             conf_index < device_desc.bNumConfigurations);
+
+    if (conf_index >= device_desc.bNumConfigurations) {
+        usbi_dbg("Failed to find valid configuration descriptor");
+        return LIBUSB_ERROR_NOT_FOUND;
+    }
 
     *buffer = (unsigned char *) malloc(config_descriptor.wTotalLength);
     if (!(*buffer))
@@ -650,7 +672,7 @@ static int read_configuration(unsigned char **buffer, struct libusb_device *dev,
 
     usbi_dbg("reading the full descriptor and dumping it into the memory we allocated");
     r = usbd_descriptor(usbd_d, 0, USB_DESC_CONFIGURATION,
-                        USB_RECIPIENT_DEVICE, config, 0,
+                        USB_RECIPIENT_DEVICE, conf_index, 0,
                         *buffer, config_descriptor.wTotalLength);
 
     if (r != EOK)
@@ -724,7 +746,8 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum, uint8_t 
     }
 
     /* Read and cache the descriptor for this configuration */
-    r = read_configuration(&priv->config_descriptor, dev, 0);
+    r = read_configuration(&priv->config_descriptor, dev,
+                           priv->selected_configuration);
 
     if (r != LIBUSB_SUCCESS) {
         usbi_dbg("Failed to read current configuration descriptor");
