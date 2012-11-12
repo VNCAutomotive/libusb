@@ -2273,6 +2273,9 @@ static int op_reset_device(struct libusb_device_handle *handle)
         usbi_err(HANDLE_CTX(handle),
                  "Failed to attach to device to reset: %d (%s)",
                  r, strerror(r));
+        if (close_device && device)
+          usbd_detach(device);
+        return qnx_err_to_libusb(r);
     }
 
     r = usbd_reset_device(device);
