@@ -1,6 +1,9 @@
 /*
  * QNX Neutrino backend for libusb
  *
+ * Copyright © 2011-2012, QNX Software Systems
+ * Portions Copyright © 2011-2013 RealVNC Ltd.
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
