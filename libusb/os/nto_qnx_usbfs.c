@@ -1579,7 +1579,8 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
 
     /* If the transfer caused a stall we must clear the pipe */
     /* The windows strategy */
-    if ((ustatus & USBD_USB_STATUS_MASK) == USBD_STATUS_STALL)
+    if ((ustatus & USBD_USB_STATUS_MASK) == USBD_STATUS_STALL &&
+        transfer->type != LIBUSB_TRANSFER_TYPE_CONTROL)
     {
         usbi_info(ITRANSFER_CTX(itransfer), "Clearing pipe...");
         status = usbd_reset_pipe(tpriv->transfer_pipe);
