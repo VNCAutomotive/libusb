@@ -166,10 +166,8 @@ static struct claimed_interfaces_list* find_claimed_interface(
 
 static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
 {
-    _uint32 urb_masked = USBD_URB_STATUS_MASK & ustatus & ~USBD_STATUS_CMP_ERR;
-    _uint32 usb_masked = USBD_USB_STATUS_MASK & ustatus & ~USBD_STATUS_CMP_ERR;
-    _uint32 urb_err = USBD_URB_STATUS_MASK & ustatus &  USBD_STATUS_CMP_ERR;
-    _uint32 usb_err = USBD_USB_STATUS_MASK & ustatus &  USBD_STATUS_CMP_ERR;
+    _uint32 urb_masked = USBD_URB_STATUS_MASK & ustatus;
+    _uint32 usb_masked = USBD_USB_STATUS_MASK & ustatus;
 
     switch (urb_masked)
     {
@@ -182,6 +180,10 @@ static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
             return LIBUSB_TRANSFER_CANCELLED;
     case USBD_STATUS_TIMEOUT:
         return LIBUSB_TRANSFER_TIMED_OUT;
+    case USBD_STATUS_CMP_ERR:
+        // Completed but with error, so need to consider
+        // the value of usb_masked.
+        break;
     default:
         usbi_err (ITRANSFER_CTX (itransfer), "transfer error: unknown.");
         return LIBUSB_TRANSFER_ERROR;
@@ -198,21 +200,21 @@ static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
     case USBD_STATUS_BUFFER_OVERRUN:
         usbi_err (ITRANSFER_CTX (itransfer), "transfer error: buffer overrun.");
         return LIBUSB_TRANSFER_OVERFLOW;
+    case USBD_STATUS_ABORTED:
+        if (itransfer->flags & USBI_TRANSFER_TIMED_OUT)
+            return LIBUSB_TRANSFER_TIMED_OUT;
+        else
+            return LIBUSB_TRANSFER_CANCELLED;
+    case USBD_STATUS_TIMEOUT:
+        return LIBUSB_TRANSFER_TIMED_OUT;
     default:
         usbi_err (ITRANSFER_CTX (itransfer), "transfer error: unknown.");
         return LIBUSB_TRANSFER_ERROR;
     }
 
-    if (urb_err || usb_err)
-    {
-        // we fall here if status is simply USBD_STATUS_CMP_ERR and no specific error code available.
-        usbi_err (ITRANSFER_CTX (itransfer), "transfer cmp error: urb_err=%x, usb_err=%x", urb_err, usb_err);
-        return LIBUSB_TRANSFER_ERROR;
-    } else {
-        // this case can't be reachable now, but better to be kept in case
-        usbi_err (ITRANSFER_CTX (itransfer), "qnx_transfer_status() invalid log");
-        return LIBUSB_TRANSFER_ERROR;
-    }
+    // this line shouldn't be reachable now, but better to be kept in case
+    usbi_err (ITRANSFER_CTX (itransfer), "qnx_transfer_status() invalid log");
+    return LIBUSB_TRANSFER_ERROR;
 }
 
 /* Sends a message down the per-device pipe to the event handling thread.
