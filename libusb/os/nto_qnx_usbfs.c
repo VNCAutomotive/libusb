@@ -171,11 +171,16 @@ static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
 {
     _uint32 urb_masked = USBD_URB_STATUS_MASK & ustatus;
     _uint32 usb_masked = USBD_USB_STATUS_MASK & ustatus;
+    if (urb_masked == USBD_STATUS_CMP)
+    {
+        // URB completed successfully
+        return LIBUSB_TRANSFER_COMPLETED;
+    }
+    // Clear the USBD_STATUS_CMP_ERR flag
+    urb_masked &= ~USBD_STATUS_CMP_ERR;
 
     switch (urb_masked)
     {
-    case USBD_STATUS_CMP:
-        return LIBUSB_TRANSFER_COMPLETED;
     case USBD_STATUS_ABORTED:
         if (itransfer->flags & USBI_TRANSFER_TIMED_OUT)
             return LIBUSB_TRANSFER_TIMED_OUT;
@@ -183,12 +188,14 @@ static int qnx_transfer_status(struct usbi_transfer *itransfer, _uint32 ustatus)
             return LIBUSB_TRANSFER_CANCELLED;
     case USBD_STATUS_TIMEOUT:
         return LIBUSB_TRANSFER_TIMED_OUT;
-    case USBD_STATUS_CMP_ERR:
-        // Completed but with error, so need to consider
-        // the value of usb_masked.
+    case 0:
+        // Completed with error, but no URB error flags set, so need
+        // to consider the value of usb_masked. The next switch
+        // statement will perform this check.
         break;
     default:
-        usbi_err (ITRANSFER_CTX (itransfer), "transfer error: unknown.");
+        usbi_err(ITRANSFER_CTX (itransfer),
+                 "transfer error: unknown, %x", ustatus);
         return LIBUSB_TRANSFER_ERROR;
     }
 
@@ -1604,27 +1611,30 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
         }
     }
 
+    /* Even error conditions can transfer some data, so copy that
+     * partial data across */
+    if (usize > 0)
+    {
+        itransfer->transferred += usize;
+
+        if (dir == URB_DIR_IN)
+        {
+            memcpy(bytes, tpriv->internal_buffer, usize);
+        }
+    }
+
     /* If the transfer went well, we need to indicate that to libusb */
     if (status == EOK)
     {
         usbi_info(ITRANSFER_CTX(itransfer),
                   "status = SUCCESS... ustatus = %x, usize = %d",
                   ustatus, usize);
-
-        itransfer->transferred += usize;
-
-        usbi_info(ITRANSFER_CTX(itransfer),
-                  "Checking the direction of the transfer, then "
-                  "copying the bytes if needed");
-
-        /* Might as well copy whatever we can... 
-           At this point we still haven't checked if the transfer has
-           completed without error*/
-        if (dir == URB_DIR_IN)
-        {
-            memcpy(bytes, tpriv->internal_buffer, usize);
-        }
-    } 
+    }
+    else if ((ustatus & USBD_URB_STATUS_MASK) == (USBD_STATUS_ABORTED | USBD_STATUS_CMP_ERR))
+    {
+        usbi_info(ITRANSFER_CTX(itransfer), "status ABORTED... ustatus = %x, usize = %d errstatus: %s status: %d",
+                  ustatus, usize, strerror(status), status);
+    }
     else
     {
         usbi_info(ITRANSFER_CTX(itransfer), "status FAILURE... ustatus = %x, usize = %d errstatus: %s status: %d",
@@ -1638,7 +1648,7 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     usbi_dbg("tpriv->internal_buffer: %p", tpriv->internal_buffer);
     usbd_free(tpriv->internal_buffer);
     usbi_dbg("Internal buffer freed");
-    
+
     /* If the transfer pipe was not the control pipe */
     usbi_info(ITRANSFER_CTX(itransfer), "Do we need to close the pipe?");
     if (!(tpriv->transfer_pipe == hpriv->control_pipe))
