@@ -19,8 +19,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef __LIBUSB_USBFS_H__
-#define __LIBUSB_USBFS_H__
+#ifndef LIBUSB_QNX_H
+#define LIBUSB_QNX_H
 
 #include <unistd.h>
 #include <string.h>
@@ -93,6 +93,6 @@ enum nto_qnx_urb_type {
 /* Function declarations */
 
 
-#endif
+#endif // LIBUSB_QNX_H
 
 
