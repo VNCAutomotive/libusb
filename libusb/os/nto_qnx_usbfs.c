@@ -1554,6 +1554,12 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     dump_itransfer_info(itransfer);
     struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
+
+    if(!tpriv->urb) {
+      usbi_info(ITRANSFER_CTX(itransfer), "Aborting qnx_handle_callback: tpriv->urb doesn't exist!");
+      return;
+    }
+
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
     struct nto_qnx_device_priv *dpriv = __device_priv(transfer->dev_handle->dev);
 
