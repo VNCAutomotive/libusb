@@ -1643,11 +1643,20 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     }
 
     /* Cleanup */
-    usbi_dbg("tpriv->urb: %p", tpriv->urb);
-    usbd_free_urb(tpriv->urb);
-    usbi_dbg("tpriv->internal_buffer: %p", tpriv->internal_buffer);
-    usbd_free(tpriv->internal_buffer);
-    usbi_dbg("Internal buffer freed");
+    if(tpriv->urb)
+    {
+      usbi_dbg("tpriv->urb: %p", tpriv->urb);
+      usbd_free_urb(tpriv->urb);
+      tpriv->urb = 0;
+    }
+
+    if(tpriv->internal_buffer)
+    {
+      usbi_dbg("tpriv->internal_buffer: %p", tpriv->internal_buffer);
+      usbd_free(tpriv->internal_buffer);
+      tpriv->internal_buffer = 0;
+      usbi_dbg("Internal buffer freed");
+    }
 
     /* If the transfer pipe was not the control pipe */
     usbi_info(ITRANSFER_CTX(itransfer), "Do we need to close the pipe?");
@@ -1655,6 +1664,7 @@ static void qnx_handle_callback(struct usbi_transfer *itransfer)
     {
         usbi_info(ITRANSFER_CTX(itransfer), "Yes we need to close the pipe");
         usbd_close_pipe(tpriv->transfer_pipe);
+        tpriv->transfer_pipe = 0;
     }
 
     usbi_info(ITRANSFER_CTX(itransfer), "Transfer completed");
@@ -2347,13 +2357,23 @@ static void op_clear_transfer_priv(struct usbi_transfer *itransfer)
     struct nto_qnx_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
     struct nto_qnx_device_handle_priv *hpriv = __device_handle_priv(transfer->dev_handle);
 
-    if (tpriv->urb) usbd_free_urb(tpriv->urb);
-    if (tpriv->internal_buffer) usbd_free(tpriv->internal_buffer);
-    
+    if (tpriv->urb)
+    {
+      usbd_free_urb(tpriv->urb);
+      tpriv->urb = 0;
+    }
+
+    if (tpriv->internal_buffer)
+    {
+      usbd_free(tpriv->internal_buffer);
+      tpriv->internal_buffer = 0;
+    }
+
     if (!(tpriv->transfer_pipe == hpriv->control_pipe))
     {
         usbi_info(ITRANSFER_CTX(itransfer), "Yes we need to close the pipe");
         usbd_close_pipe(tpriv->transfer_pipe);
+        tpriv->transfer_pipe = 0;
     }
 }
 
