@@ -1,0 +1,10 @@
+In order to build for QNX, do the following:
+
+    $ ./autogen.sh
+    $ make distclean
+    $ addvariant -i OS/CPU/VERSION nto arm so-v7-le
+    $ cd nto-arm-so-v7-le
+    $ make
+
+You can modify the instructions as appropriate for architectures other than
+armv7.

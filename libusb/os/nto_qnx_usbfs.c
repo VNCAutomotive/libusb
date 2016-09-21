@@ -866,7 +866,7 @@ static int op_get_device_list(struct libusb_context *ctx,
         } 
     }
 
-    return 0;
+    return r;
 }
 
 
@@ -2479,8 +2479,7 @@ const struct usbi_os_backend nto_qnx_usbfs_backend = {
 
 	.device_priv_size = sizeof(struct nto_qnx_device_priv),
 	.device_handle_priv_size = sizeof(struct nto_qnx_device_handle_priv),
-	.transfer_priv_size = sizeof(struct nto_qnx_transfer_priv),
-	.add_iso_packet_size = 0
+	.transfer_priv_size = sizeof(struct nto_qnx_transfer_priv)
 
 };
 
