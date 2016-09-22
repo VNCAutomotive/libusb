@@ -194,7 +194,7 @@ nto-qnx)
 	AC_DEFINE(OS_NTO_QNX, 1, [QNX backend])
 	AC_SUBST(OS_NTO_QNX)
 	THREAD_CFLAGS=""
-	PC_LIBS_PRIVATE="-lusbdi"
+	LIBS="-lusbdi"
 	AC_CHECK_HEADERS([poll.h])
 	AC_DEFINE([POLL_NFDS_TYPE],[nfds_t],[type of second poll() argument])
 	;;
