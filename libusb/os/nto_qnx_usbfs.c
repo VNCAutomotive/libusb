@@ -683,6 +683,7 @@ static int initialize_device(struct libusb_device *dev,
     /* The number of configurations is the last byte in the device
        descriptor, but this could be cleaner. */
     dev->num_configurations = device_buffer[DEVICE_DESC_LENGTH - 1];
+    dev->device_descriptor.bNumConfigurations = dev->num_configurations;
 
     /* Read and cache the descriptor for this configuration */
     r = read_configuration(&priv->config_descriptor, dev,
@@ -918,7 +919,7 @@ static int op_get_device_descriptor(struct libusb_device *dev,
  * set the host_endian output parameter to "1".
  *
  * Return:
- * - 0 on success
+ * - Size of descriptor on success
  * - LIBUSB_ERROR_NOT_FOUND if the device is in unconfigured state
  * - another LIBUSB_ERROR code on other failure
  */
@@ -932,7 +933,7 @@ static int op_get_active_config_descriptor(struct libusb_device *dev,
         return LIBUSB_ERROR_NOT_FOUND;
     }
     memcpy(buffer, priv->config_descriptor, len);
-    return 0;
+    return len;
 }
 
 /* Get a specific configuration descriptor for a device.
@@ -954,7 +955,7 @@ static int op_get_active_config_descriptor(struct libusb_device *dev,
  * (LE). If it returns the multi-byte values in host-endian format,
  * set the host_endian output parameter to "1".
  *
- * Return 0 on success or a LIBUSB_ERROR code on failure.
+ * Return the length read on success or a LIBUSB_ERROR code on failure.
  */
 static int op_get_config_descriptor(struct libusb_device *dev,
 	uint8_t config_index, unsigned char *buffer, size_t len, int *host_endian)
@@ -973,7 +974,9 @@ static int op_get_config_descriptor(struct libusb_device *dev,
     if(r == EMSGSIZE)
         r = 0;
     
-    return qnx_err_to_libusb(r);
+    if (r)
+      return qnx_err_to_libusb(r);
+    return len;
 }
 
 
