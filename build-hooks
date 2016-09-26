@@ -1,0 +1,5 @@
+# Used by QNX build system for setting configure flags
+
+function hook_preconfigure {
+   configure_opts=--prefix=$(pwd)/dist
+}
