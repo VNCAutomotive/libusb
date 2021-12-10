@@ -457,10 +457,20 @@ static int op_init(struct libusb_context * ctx)
                                      USBD_CONNECT_WILDCARD, /* subclass */
                                      USBD_CONNECT_WILDCARD  /* protocol */ };
 
-    usbd_connect_parm_t parm = { 0, USB_VERSION, USBD_VERSION, 0, 0, 0, 0, &interest, &funcs, 0 };
+    // On QNX sometimes the USB stack for the OTG port is not the default one.
+    // Check this environment variable to see if an override has been specified.
+    const char* libusb_stack_path = getenv("VAUTO_QNX_USB_PATH_OVERRIDE");
+
+    // If the string is empty then set to NULL to use the default system stack path.
+    if( libusb_stack_path != NULL && strlen(libusb_stack_path) == 0 )
+    {
+        libusb_stack_path = NULL;
+    }
+
+    usbd_connect_parm_t parm = { libusb_stack_path, USB_VERSION, USBD_VERSION, 0, 0, 0, 0, &interest, &funcs, 0 };
 
     /* Adding null for callbacks allows creation of a connection in read-only mode: */
-    usbd_connect_parm_t ro_parm = { 0, USB_VERSION, USBD_VERSION, 0, 0, 0, 0, &interest, NULL, 0 }; 
+    usbd_connect_parm_t ro_parm = { libusb_stack_path, USB_VERSION, USBD_VERSION, 0, 0, 0, 0, &interest, NULL, 0 };
 
     int status = EOK;
 
