@@ -844,7 +844,7 @@ static int op_get_device_list(struct libusb_context *ctx,
             if (status == EOK)
             {
                 usbi_dbg("found a device, bus number: %d, device address: %d", busno, devno);
-                r = enumerate_device(ctx, &discdevs, busno, devno,
+                r = enumerate_device(ctx, _discdevs, busno, devno,
                                      usbd_d, &instance);
             }
             if (status == EBUSY)
